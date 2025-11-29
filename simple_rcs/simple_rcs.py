@@ -48,14 +48,12 @@ class SimpleRCS:
         -   Uses a format compatible with `diff -n` (RCS): `d<line> <count>` and `a<line> <count>`.
 
     6.  **Hash Chain & Integrity (v2):**
-        -   Supports v2 format with SHA-256 hash chains.
+        -   Supports v2 format with configurable hash algorithms (default SHA-256).
         -   Each block contains a `hash` of its content (Full Text + Metadata) and the `prev_hash`.
         -   This ensures tamper-evidence. Changing any past version breaks the chain.
     """
 
-    MAGIC_HEADER_V2 = b"# SimpleRCS v2.0; hash_algo=sha256;\n"
-
-    def __init__(self, content_or_path: str | bytes | BinaryIO | None = None) -> None:
+    def __init__(self, content_or_path: str | bytes | BinaryIO | None = None, hash_algo: str = "sha256") -> None:
         """
         Initializes the SimpleRCS instance.
 
@@ -66,16 +64,26 @@ class SimpleRCS:
                 - str (content): Treats the string as RCS content (wraps in BytesIO).
                 - bytes: Treats bytes as RCS content (wraps in BytesIO).
                 - file-like object: Uses the provided binary stream directly.
+            hash_algo: Hash algorithm to use for new v2 files (default: "sha256").
+                       Must be supported by hashlib.
         """
         self.file_path: str | None = None
         self.stream: BinaryIO
         self.owns_handle = False # Flag to indicate if we opened the file handle and should close it
         self._version = 1 # Default to v1
+        self._hash_algo = hash_algo
+
+        # Validate hash_algo early
+        if hash_algo not in hashlib.algorithms_available:
+             try:
+                 hashlib.new(hash_algo)
+             except ValueError as e:
+                 raise ValueError(f"Hash algorithm '{hash_algo}' is not supported by hashlib.") from e
 
         if content_or_path is None:
             # New empty in-memory RCS -> v2
             self.stream = io.BytesIO()
-            self.stream.write(self.MAGIC_HEADER_V2)
+            self._write_v2_header()
             self._version = 2
             self.owns_handle = True
         elif isinstance(content_or_path, str):
@@ -90,7 +98,7 @@ class SimpleRCS:
 
                 # Check version for existing file, or init new file
                 if mode == "wb+":
-                    self.stream.write(self.MAGIC_HEADER_V2)
+                    self._write_v2_header()
                     self._version = 2
                 else:
                     self._version = self._detect_format_version()
@@ -114,20 +122,44 @@ class SimpleRCS:
         self.head_info: dict | None = None
         self._load_head()
 
+    def _write_v2_header(self) -> None:
+        """Writes the v2 magic header with the chosen hash algorithm."""
+        header = f"# SimpleRCS v2.0; hash_algo={self._hash_algo};\n"
+        self.stream.write(header.encode('utf-8'))
+
     def _detect_format_version(self) -> int:
-        """Detects the format version from the stream header."""
+        """
+        Detects format version and hash algorithm from the stream header.
+        Updates self._hash_algo if found.
+        """
         pos = self.stream.tell()
         self.stream.seek(0)
-        header = self.stream.readline()
-        self.stream.seek(pos) # Restore position
+        # Read first line, handle potential binary data gracefully
+        try:
+            header_bytes = self.stream.readline()
+            header = header_bytes.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            header = ""
+        finally:
+            self.stream.seek(pos) # Restore position
 
-        if header.startswith(b"# SimpleRCS v2.0;"):
+        if header.startswith("# SimpleRCS v2.0;"):
+            # Parse hash_algo
+            match = re.search(r'hash_algo=([^;]+)', header)
+            if match:
+                algo = match.group(1).strip()
+                # Verify support (optional, but good for safety)
+                try:
+                    hashlib.new(algo)
+                    self._hash_algo = algo
+                except ValueError as e:
+                    raise ValueError(f"Invalid hash algo {algo}") from e
             return 2
         return 1
 
     def _calculate_block_hash(self, data: dict, prev_hash: str | None = None) -> str:
         """
-        Calculates SHA-256 hash of the block content.
+        Calculates hash of the block content using self._hash_algo.
         IMPORTANT: The hash is calculated based on the LOGICAL content (Full Text),
         not the stored delta. This ensures the hash remains valid even when
         HEAD becomes a historical delta block.
@@ -141,14 +173,17 @@ class SimpleRCS:
         log = str(data.get("log", ""))
         text = str(data.get("text", "")) # This MUST be Full Text
 
-        # Enforce EOL policy: Text must end with \n for consistent hashing
+        # Enforce EOL policy
         if text and not text.endswith('\n'):
             text += '\n'
 
         p_hash = prev_hash if prev_hash else ""
 
         payload = f"{ver}|{date}|{author}|{log}|{text}|{p_hash}"
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+        hasher = hashlib.new(self._hash_algo)
+        hasher.update(payload.encode('utf-8'))
+        return hasher.hexdigest()
 
 
     def __del__(self) -> None:
