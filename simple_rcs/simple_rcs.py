@@ -1,10 +1,15 @@
 import difflib
+import hashlib
 import io
+import logging
 import os
 import re
+from collections.abc import Callable
 from datetime import datetime
 from typing import BinaryIO
 
+
+logger = logging.getLogger(__name__)
 
 class SimpleRCS:
     """
@@ -41,7 +46,14 @@ class SimpleRCS:
 
     5.  **RCS Diff Format:**
         -   Uses a format compatible with `diff -n` (RCS): `d<line> <count>` and `a<line> <count>`.
+
+    6.  **Hash Chain & Integrity (v2):**
+        -   Supports v2 format with SHA-256 hash chains.
+        -   Each block contains a `hash` of its content (Full Text + Metadata) and the `prev_hash`.
+        -   This ensures tamper-evidence. Changing any past version breaks the chain.
     """
+
+    MAGIC_HEADER_V2 = b"# SimpleRCS v2.0; hash_algo=sha256;\n"
 
     def __init__(self, content_or_path: str | bytes | BinaryIO | None = None) -> None:
         """
@@ -58,35 +70,86 @@ class SimpleRCS:
         self.file_path: str | None = None
         self.stream: BinaryIO
         self.owns_handle = False # Flag to indicate if we opened the file handle and should close it
+        self._version = 1 # Default to v1
 
         if content_or_path is None:
-            # New empty in-memory RCS
+            # New empty in-memory RCS -> v2
             self.stream = io.BytesIO()
+            self.stream.write(self.MAGIC_HEADER_V2)
+            self._version = 2
             self.owns_handle = True
         elif isinstance(content_or_path, str):
             # Check if it's a file path heuristic
-            if os.path.exists(content_or_path) or (not content_or_path.startswith(('@', 'ver')) and '\n' not in content_or_path):
-                # Assume file path if it exists or doesn't look like RCS content and no newlines
+            if os.path.exists(content_or_path) or (
+                    not content_or_path.startswith(('@', 'ver', '#')) and '\n' not in content_or_path):
+                # Assume file path
                 mode = "rb+" if os.path.exists(content_or_path) else "wb+"
                 self.stream = open(content_or_path, mode)
                 self.file_path = content_or_path
                 self.owns_handle = True
+
+                # Check version for existing file, or init new file
+                if mode == "wb+":
+                    self.stream.write(self.MAGIC_HEADER_V2)
+                    self._version = 2
+                else:
+                    self._version = self._detect_format_version()
             else:
                 # Treat as raw string content -> In-memory stream
                 self.stream = io.BytesIO(content_or_path.encode('utf-8'))
+                self._version = self._detect_format_version()
                 self.owns_handle = True
         elif isinstance(content_or_path, bytes):
             self.stream = io.BytesIO(content_or_path)
+            self._version = self._detect_format_version()
             self.owns_handle = True
         elif hasattr(content_or_path, 'read') and hasattr(content_or_path, 'seek'):
             # External file-like object
             self.stream = content_or_path
+            self._version = self._detect_format_version()
             self.owns_handle = False
         else:
             raise ValueError("Invalid input type. Expected file path, string, bytes, or file-like object.")
 
         self.head_info: dict | None = None
         self._load_head()
+
+    def _detect_format_version(self) -> int:
+        """Detects the format version from the stream header."""
+        pos = self.stream.tell()
+        self.stream.seek(0)
+        header = self.stream.readline()
+        self.stream.seek(pos) # Restore position
+
+        if header.startswith(b"# SimpleRCS v2.0;"):
+            return 2
+        return 1
+
+    def _calculate_block_hash(self, data: dict, prev_hash: str | None = None) -> str:
+        """
+        Calculates SHA-256 hash of the block content.
+        IMPORTANT: The hash is calculated based on the LOGICAL content (Full Text),
+        not the stored delta. This ensures the hash remains valid even when
+        HEAD becomes a historical delta block.
+
+        Payload: ver|date|author|log|text|prev_hash
+        """
+        # Ensure we use empty string for None to keep hash stable
+        ver = str(data.get("ver", ""))
+        date = str(data.get("date", ""))
+        author = str(data.get("author", ""))
+        log = str(data.get("log", ""))
+        text = str(data.get("text", "")) # This MUST be Full Text
+
+        # Enforce EOL policy: Text must end with \n for consistent hashing
+        if text and not text.endswith('\n'):
+            text += '\n'
+
+        p_hash = prev_hash if prev_hash else ""
+
+        payload = f"{ver}|{date}|{author}|{log}|{text}|{p_hash}"
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
 
     def __del__(self) -> None:
         """Closes the stream if this instance owns it."""
@@ -143,13 +206,14 @@ class SimpleRCS:
         This method uses direct byte-stream manipulation for potentially higher performance
         and robustness against malformed regex inputs.
         """
+        # Define keywords as bytes for direct comparison
+        # Added v2 keywords: prev_hash, hash, signature
+        _keywords = [b'ver', b'version', b'date', b'author', b'log', b'text', b'prev_hash', b'hash', b'signature']
+
         content = content_bytes
         length = len(content)
         pos = 0
         data = {}
-
-        # Define keywords as bytes for direct comparison
-        _KEYWORDS = [b'ver', b'version', b'date', b'author', b'log', b'text']
 
         while pos < length:
             # Skip whitespace
@@ -165,7 +229,7 @@ class SimpleRCS:
             key_bytes = content[key_start:pos]
 
             # Ensure the key is a valid keyword, otherwise break (malformed block)
-            if key_bytes not in _KEYWORDS:
+            if key_bytes not in _keywords:
                 break
 
             # Skip whitespace after key
@@ -216,7 +280,14 @@ class SimpleRCS:
             key_str = key_bytes.decode('utf-8')
             if key_str == 'version':
                 key_str = 'ver' # Normalize key
-            data[key_str] = value
+
+            if key_str == 'signature':
+                # Handle multiple signatures
+                if 'signatures' not in data:
+                    data['signatures'] = []
+                data['signatures'].append(value)
+            else:
+                data[key_str] = value
 
         # Basic validation to ensure it looks like a valid block
         if 'ver' in data:
@@ -394,8 +465,8 @@ class SimpleRCS:
             try:
                 start = int(parts[0][1:]) # Line number from 'd1' or 'a1'
                 count = int(parts[1])     # Count of lines
-            except (ValueError, IndexError):
-                continue # Skip malformed commands
+            except (ValueError, IndexError) as e:
+                raise ValueError("Invalid delta format") from e
 
             payload = []
             if cmd_char == 'a':
@@ -419,18 +490,50 @@ class SimpleRCS:
                 # Delete `count` lines starting AT line `idx` (List index `idx-1`)
                 start_pos = idx - 1
                 del lines[start_pos:start_pos + cmd["count"]]
-        return "".join(lines)
+        result = "".join(lines)
+        # Enforce EOL policy
+        if result and not result.endswith('\n'):
+            result += '\n'
+        return result
 
-    def _format_block(self, data: dict) -> bytes:
-        """Formats a block dictionary into bytes for writing to the stream."""
+    def _format_block(
+        self,
+        data: dict,
+        current_hash: str | None = None,
+        prev_hash: str | None = None,
+        signatures: list[str] | None = None,
+    ) -> bytes:
+        """
+        Formats a block dictionary into bytes for writing to the stream.
+        Supports v2 fields (hash, prev_hash, signatures).
+        """
         keys = ["ver", "date", "author", "log", "text"]
         lines = []
         for key in keys:
             val = self._escape(str(data.get(key, "")))
             lines.append(f"{key} @{val}@;")
+
+        # Add v2 fields if present
+        if self._version >= 2:
+            if prev_hash:
+                lines.append(f"prev_hash @{self._escape(prev_hash)}@;")
+            if current_hash:
+                lines.append(f"hash @{self._escape(current_hash)}@;")
+
+            if signatures:
+                for sig in signatures:
+                    lines.append(f"signature @{self._escape(sig)}@;")
+
         return ("\n".join(lines) + "\n\n").encode('utf-8')
 
-    def commit(self, content: str, author: str = "unknown", log: str = "") -> str:
+    def commit(  # noqa: C901
+        self,
+        content: str,
+        author: str = "unknown",
+        log: str = "",
+        signer_callbacks: list[Callable[[str], tuple[str, str]]] | None = None,
+        date: str | None = None,
+    ) -> str:
         """
         Commits new content as the latest version.
 
@@ -440,25 +543,52 @@ class SimpleRCS:
         3. Overwrite the on-disk HEAD block with this Delta.
         4. Append the New Content as the new HEAD block (Full Text).
 
+        Args:
+            signer_callbacks: List of functions for v2 signing.
+                              Each accepts a message (str) and returns (signer_id, signature_value).
+            data: Optional timestamp string.
+
         Returns:
             The new version number (e.g., "1.2") if working with a file path.
             The full RCS content string if working with an in-memory stream.
         """
         self._load_head() # Refresh HEAD info by scanning the stream
-        now = datetime.now().isoformat()
+        now = date if date else datetime.now().isoformat()
 
+        # Enforce EOL policy for consistent hashing
+        if content and not content.endswith('\n'):
+            content += '\n'
+
+        # --- First Commit Case ---
         if not self.head_info:
-            # First commit: Write full content as 1.0
             new_ver = "1.0"
             block_data = {"ver": new_ver, "date": now, "author": author, "log": log, "text": content}
 
+            # v2 Logic: Hash & Sign
+            curr_hash = None
+            signatures = []
+            if self._version >= 2:
+                # Calculate Hash (prev_hash is empty for first block)
+                curr_hash = self._calculate_block_hash(block_data, prev_hash="")
+
+                # Sign
+                if signer_callbacks:
+                    for callback in signer_callbacks:
+                        # Message to sign: Timestamp|Hash
+                        # This binds the signature to the specific content and time
+                        sig_ts = datetime.now().isoformat()
+                        msg_to_sign = f"{sig_ts}|{curr_hash}"
+                        signer_id, sig_val = callback(msg_to_sign)
+                        signatures.append(f"{signer_id}|{sig_ts}|{sig_val}")
+
             self.stream.seek(0, os.SEEK_END) # Append to end
-            self.stream.write(self._format_block(block_data))
+            self.stream.write(self._format_block(block_data, current_hash=curr_hash, signatures=signatures))
 
             if isinstance(self.stream, io.BytesIO):
                 return self.get_content()
             return new_ver
 
+        # --- Subsequent Commit Case ---
         head = self.head_info
         head_content = head["text"]
 
@@ -466,30 +596,104 @@ class SimpleRCS:
         delta = self._generate_reverse_delta(content, head_content)
 
         # 2. Prepare blocks for writing
-        # The old HEAD block (Vn) becomes a Delta block.
+
+        # [Old Block (Vn)]
+        # Becomes a Delta block.
+        # Ideally, we preserve its original hash and signatures because they represent the Logical Full Text.
+        # self.head_info already contains 'hash' and 'signatures' if parsed correctly from v2 file.
         head_block_data = head.copy()
         head_block_data["text"] = delta
-        # Remove internal metadata (start/end offsets) before formatting for writing
+
+        # Cleanup internal metadata
         if "start" in head_block_data:
             del head_block_data["start"]
         if "end" in head_block_data:
             del head_block_data["end"]
+        # In v2, we must preserve 'hash', 'prev_hash', 'signatures' from the original head block.
+        # They should already be in head_block_data if _parse_block_content_no_regex loaded them.
+        # We need to extract them to pass to _format_block explicit args, or update _format_block to look in data?
+        # _format_block takes explicit args for these.
+        # Let's extract them.
+        old_prev_hash = head_block_data.get("prev_hash")
+        old_curr_hash = head_block_data.get("hash")
+        old_signatures = head_block_data.get("signatures")
+
+        # Remove them from data dict so they don't get duplicated or mishandled by _format_block's generic loop
+        # (Though _format_block only iterates specific keys 'ver'...'text', so extra keys in dict are ignored. Safe.)
 
         # The new HEAD block (Vn+1) is Full Text.
-        last_ver = float(head.get("ver", "0.0"))
-        new_ver = f"{last_ver + 0.1:.1f}"
+        # Increment version: 1.9 -> 1.10 (RCS style), not 2.0 (Float style)
+        last_ver_str = head.get("ver", "0.0")
+        try:
+            parts = [int(p) for p in last_ver_str.split('.')]
+            if parts:
+                parts[-1] += 1
+                new_ver = ".".join(map(str, parts))
+            else:
+                new_ver = "1.0"
+        except ValueError:
+            new_ver = "1.0" # Fallback if version is malformed
+
         new_block_data = {"ver": new_ver, "date": now, "author": author, "log": log, "text": content}
 
-        # 3. Write to stream: Overwrite previous HEAD, then Append new HEAD
-        old_block_bytes = self._format_block(head_block_data)
-        new_block_bytes = self._format_block(new_block_data)
+        new_curr_hash = None
+        new_prev_hash = None
+        new_signatures = []
+
+        if self._version >= 2:
+            # New block's prev_hash is the Old Block's hash (which represents its Full Text state)
+            # If Old Block was v1, it might not have a hash. We might need to compute it now?
+            # If we are migrating or mixing, this is tricky.
+            # But our policy: "v1 file keeps v1". "v2 file has hashes".
+            # So if self._version >= 2, Old Block MUST have a hash (unless it's the genesis block of a v2 file?).
+            # Wait, if we just upgraded code but file is v2, head should have hash.
+
+            if old_curr_hash:
+                new_prev_hash = old_curr_hash
+            else:
+                # Fallback: if old block didn't have hash (maybe corrupted v2?), compute it now based on OLD FULL TEXT
+                # We have 'head' (Full Text) in memory.
+                # prev_hash for Old Block? We might need to look it up.
+                # Simplified: If missing, treat as empty chain start or error?
+                # Let's compute it.
+                new_prev_hash = self._calculate_block_hash(head, prev_hash=old_prev_hash)
+
+            # Calculate New Block Hash
+            new_curr_hash = self._calculate_block_hash(new_block_data, prev_hash=new_prev_hash)
+
+            # Sign New Block
+            if signer_callbacks:
+                for callback in signer_callbacks:
+                    sig_ts = datetime.now().isoformat()
+                    msg_to_sign = f"{sig_ts}|{new_curr_hash}"
+                    signer_id, sig_val = callback(msg_to_sign)
+                    new_signatures.append(f"{signer_id}|{sig_ts}|{sig_val}")
+
+        # 3. Write to stream
+
+        # Overwrite Old Block (as Delta)
+        # We pass the ORIGINAL hash/sig info to preserve it.
+        # Even though text is now Delta, the Hash represents the Full Text version of this block.
+        old_block_bytes = self._format_block(
+            head_block_data,
+            current_hash=old_curr_hash,
+            prev_hash=old_prev_hash,
+            signatures=old_signatures,
+        )
+
+        # Append New Block (Full Text)
+        new_block_bytes = self._format_block(
+            new_block_data,
+            current_hash=new_curr_hash,
+            prev_hash=new_prev_hash,
+            signatures=new_signatures,
+        )
 
         self.stream.seek(self.head_info['start'])
         self.stream.write(old_block_bytes)
         self.stream.write(new_block_bytes)
-        self.stream.truncate() # Crucial: remove any leftover if new block is shorter
+        self.stream.truncate() # Crucial: remove any leftover
 
-        # Return based on stream type
         if isinstance(self.stream, io.BytesIO):
             return self.get_content()
         return new_ver
@@ -706,8 +910,8 @@ class SimpleRCS:
                 try:
                     start = int(parts[0][1:])
                     count = int(parts[1])
-                except Exception as _:
-                    continue
+                except (ValueError, IndexError) as e:
+                    raise ValueError(f"Invalid delta format: {e}") from e
 
                 if cmd == 'a':
                     for _ in range(count):
@@ -766,3 +970,203 @@ class SimpleRCS:
 
         return result
 
+    def sign_head(self, signer_callbacks: list[Callable[[str], tuple[str, str]]]) -> bool:
+        """
+        Adds signatures to the current HEAD block.
+        This is possible because signatures are not part of the hash calculation.
+        HEAD is at the end of the file, so we can overwrite it easily.
+
+        Args:
+            signer_callbacks: List of functions for v2 signing.
+                              Each accepts a message (str) and returns (signer_id, signature_value).
+
+        Returns:
+            True if signing was successful, False otherwise.
+        """
+        if self._version < 2:
+            logger.error("Error: Signing is only supported for SimpleRCS v2 or higher.")
+            return False # Not supported in v1
+
+        self._load_head()
+        if not self.head_info:
+            logger.error("Error: No HEAD block found to sign.")
+            return False
+
+        # Retrieve necessary data from HEAD for hash calculation
+        head_data_for_hash = {
+            'ver': self.head_info.get('ver'),
+            'date': self.head_info.get('date'),
+            'author': self.head_info.get('author'),
+            'log': self.head_info.get('log'),
+            'text': self.head_info.get('text'), # Full Text
+        }
+        stored_prev_hash = self.head_info.get('prev_hash')
+        stored_hash = self.head_info.get('hash')
+
+        # Re-calculate hash to confirm integrity before signing
+        calculated_hash = self._calculate_block_hash(head_data_for_hash, prev_hash=stored_prev_hash)
+
+        if calculated_hash != stored_hash:
+            logger.error(f"Error: HEAD hash mismatch. Stored: {stored_hash},"
+                "Calculated: {calculated_hash}. Cannot sign corrupted block.")
+            return False
+
+        # Generate new signatures
+        new_signatures = []
+        if signer_callbacks:
+            for callback in signer_callbacks:
+                sig_ts = datetime.now().isoformat()
+                msg_to_sign = f"{sig_ts}|{calculated_hash}"
+                try:
+                    signer_id, sig_val = callback(msg_to_sign)
+                    new_signatures.append(f"{signer_id}|{sig_ts}|{sig_val}")
+                except Exception as e:
+                    logger.warning(f"Warning: Signing callback failed for message '{msg_to_sign}': {e}")
+                    return False # Fail if any callback fails
+
+        # Merge with existing signatures
+        existing_signatures = self.head_info.get('signatures', [])
+        all_signatures = existing_signatures + new_signatures
+
+        # Prepare block data for rewriting HEAD
+        # We need to use the original data (with Full Text) but replace its 'text' with delta if it were historical.
+        # But for HEAD, its 'text' field in head_info IS the Full Text.
+        block_data_for_rewrite = self.head_info.copy()
+        # Remove internal metadata before formatting
+        if 'start' in block_data_for_rewrite:
+            del block_data_for_rewrite['start']
+        if 'end' in block_data_for_rewrite:
+            del block_data_for_rewrite['end']
+
+        # Rewrite HEAD block at its original start position
+        block_bytes = self._format_block(
+            block_data_for_rewrite,
+            current_hash=stored_hash,
+            prev_hash=stored_prev_hash,
+            signatures=all_signatures,
+        )
+
+        self.stream.seek(self.head_info['start'])
+        self.stream.write(block_bytes)
+        self.stream.truncate() # Ensure no leftover if new block is shorter (unlikely here)
+
+        # Refresh head_info so instance state reflects new signatures
+        self._load_head()
+
+        return True
+
+    def verify(self, verifier_callbacks: list[Callable[[str, str, str], bool]] | None = None) -> bool:  # noqa: C901
+        """
+        Verifies the integrity of the hash chain and signatures (v2 only).
+
+        Args:
+            verifier_callbacks: List of functions to verify signatures.
+                                Each callable receives (signer_id, message, signature_value)
+                                and returns True if valid.
+
+        Returns:
+            True if integrity is intact, False otherwise.
+        """
+        if self._version < 2:
+            return True # v1 has no integrity features
+
+        self._load_head()
+        if not self.head_info:
+            return True # Empty file is valid
+
+        curr_block = self.head_info
+
+        # To verify hashes, we need the Full Text of each version.
+        # Since we traverse backwards (HEAD -> V1), and blocks store Reverse Deltas,
+        # we start with HEAD (Full Text) and apply deltas to get previous versions.
+        # This matches the 'checkout' traversal logic perfectly.
+
+        curr_text = curr_block['text'] # HEAD is Full Text
+
+        # We need to track the 'expected hash' for the *next* block's prev_hash check
+        # But we are going backwards.
+        # Current Block's 'prev_hash' must match Previous Block's Hash.
+
+        while curr_block:
+            # 1. Verify Current Block's Hash
+            # Hash is based on: Metadata + Full Text + prev_hash
+            stored_hash = curr_block.get('hash')
+            stored_prev_hash = curr_block.get('prev_hash')
+
+            if not stored_hash:
+                # v2 block MUST have a hash
+                return False
+
+            # Reconstruct data dict for hashing (must match commit logic)
+            # We use the 'curr_text' which is the Full Text of this version.
+            block_data_for_hash = curr_block.copy()
+            block_data_for_hash['text'] = curr_text
+
+            calculated_hash = self._calculate_block_hash(block_data_for_hash, prev_hash=stored_prev_hash)
+
+            if calculated_hash != stored_hash:
+                logger.error(f"calc hash = {calculated_hash} ,stored hash = {stored_hash}")
+                logger.error(f"Hash mismatch at version {curr_block.get('ver')}")
+                return False
+
+            # 2. Verify Signatures (if callbacks provided)
+            signatures = curr_block.get('signatures', [])
+            if verifier_callbacks and signatures:
+                # Signatures format: signer_id|timestamp|sig_val
+                # Message signed: timestamp|hash
+                for sig_entry in signatures:
+                    try:
+                        parts = sig_entry.split('|')
+                        if len(parts) < 3:
+                            continue
+                        signer_id = parts[0]
+                        timestamp = parts[1]
+                        sig_val = "|".join(parts[2:]) # In case sig_val has |
+
+                        msg = f"{timestamp}|{stored_hash}"
+
+                        # Check if ANY verifier accepts this signature
+                        valid_sig = False
+                        for verifier in verifier_callbacks:
+                            if verifier(signer_id, msg, sig_val):
+                                valid_sig = True
+                                break
+
+                        if not valid_sig:
+                            logger.error(f"Invalid signature at version {curr_block.get('ver')} by {signer_id}")
+                            return False
+                    except Exception:
+                        return False
+
+            # 3. Move to Previous Block
+            prev_block = self._get_prev_block(curr_block['start'])
+
+            if prev_block:
+                # Verify Chain Link: Current.prev_hash == Hash(Previous Block)
+                # But we haven't calculated Previous Block's hash yet?
+                # We can't verify 'stored_prev_hash' until we process 'prev_block'.
+                # Wait. 'stored_prev_hash' MUST equal the hash we *will* calculate for prev_block.
+                # So we pass 'stored_prev_hash' down to the next iteration?
+                # Let's verify it in the next iteration:
+                # "Next iteration's calculated hash must equal This iteration's stored_prev_hash"
+
+                # Apply delta to get Full Text of Previous Version
+                delta = prev_block['text']
+                curr_text = self._apply_reverse_delta(curr_text, delta)
+
+                # We need to temporarily peek/calculate prev_block's hash to verify the link NOW?
+                # Or just verify it when we become 'prev_block'.
+                # If we verify it *when we process prev_block*, we check:
+                #   calc_hash(prev_block) == prev_block.stored_hash
+                # AND
+                #   prev_block.stored_hash == curr_block.stored_prev_hash
+
+                # So we just need to check:
+                # curr_block['prev_hash'] == prev_block['hash']
+                if curr_block.get('prev_hash') != prev_block.get('hash'):
+                    logger.error(f"Chain broken between {curr_block.get('ver')} and {prev_block.get('ver')}")
+                    return False
+
+            curr_block = prev_block
+
+        return True
