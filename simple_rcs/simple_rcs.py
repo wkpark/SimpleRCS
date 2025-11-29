@@ -136,6 +136,93 @@ class SimpleRCS:
             return data
         return {}
 
+    def _parse_block_content_no_regex(self, content_bytes: bytes) -> dict:  # noqa: C901
+        """
+        Parses a raw block bytes into a dictionary WITHOUT regex.
+        Format: key @value@; ...
+        This method uses direct byte-stream manipulation for potentially higher performance
+        and robustness against malformed regex inputs.
+        """
+        content = content_bytes
+        length = len(content)
+        pos = 0
+        data = {}
+
+        # Define keywords as bytes for direct comparison
+        _KEYWORDS = [b'ver', b'version', b'date', b'author', b'log', b'text']
+
+        while pos < length:
+            # Skip whitespace
+            while pos < length and content[pos] in b' \t\r\n':
+                pos += 1
+            if pos >= length:
+                break
+
+            # Read Key
+            key_start = pos
+            while pos < length and content[pos] not in b' @;':
+                pos += 1
+            key_bytes = content[key_start:pos]
+
+            # Ensure the key is a valid keyword, otherwise break (malformed block)
+            if key_bytes not in _KEYWORDS:
+                break
+
+            # Skip whitespace after key
+            while pos < length and content[pos] in b' \t\r\n':
+                pos += 1
+
+            # Expect '@' for value start
+            if pos >= length or content[pos] != ord('@'):
+                # Malformed or unexpected char where '@' was expected
+                break
+
+            pos += 1 # Skip opening '@'
+
+            # Read Value, handling '@@' escaping
+            val_parts = []
+            while pos < length:
+                # Fast search for next '@'
+                end = content.find(b'@', pos)
+                if end == -1:
+                    # Unterminated string, malformed block
+                    break
+
+                # Check for double '@@' (escaped '@')
+                if end + 1 < length and content[end+1] == ord('@'):
+                    val_parts.append(content[pos:end])
+                    val_parts.append(b'@') # Unescape @@ -> @
+                    pos = end + 2
+                else:
+                    val_parts.append(content[pos:end])
+                    pos = end + 1 # Skip closing '@'
+                    break
+
+            value_bytes = b"".join(val_parts)
+            value = value_bytes.decode('utf-8', errors='replace')
+
+            # Skip whitespace after value
+            while pos < length and content[pos] in b' \t\r\n':
+                pos += 1
+
+            # Expect ';' after value
+            if pos < length and content[pos] == ord(';'):
+                pos += 1
+            else:
+                # Malformed, missing ';'
+                break
+
+            # Store data
+            key_str = key_bytes.decode('utf-8')
+            if key_str == 'version':
+                key_str = 'ver' # Normalize key
+            data[key_str] = value
+
+        # Basic validation to ensure it looks like a valid block
+        if 'ver' in data:
+            return data
+        return {}
+
     def _load_head(self) -> None:
         """
         Locates and loads ONLY the last block (HEAD) by scanning backwards from EOF.
@@ -175,7 +262,7 @@ class SimpleRCS:
                 self.stream.seek(abs_start)
                 block_bytes = self.stream.read() # Read until EOF (HEAD is always at the end)
 
-                parsed = self._parse_block_content(block_bytes)
+                parsed = self._parse_block_content_no_regex(block_bytes)
                 if parsed:
                     parsed['start'] = abs_start
                     parsed['end'] = file_size
@@ -226,7 +313,7 @@ class SimpleRCS:
                 length = current_start_offset - abs_start
                 block_bytes = self.stream.read(length)
 
-                parsed = self._parse_block_content(block_bytes)
+                parsed = self._parse_block_content_no_regex(block_bytes)
                 if parsed:
                     parsed['start'] = abs_start
                     parsed['end'] = current_start_offset
@@ -447,3 +534,71 @@ class SimpleRCS:
             curr_block = prev_block # Move to the previous block
 
         return "" # Should not be reached if target_idx was found
+
+    def log(self, limit: int | None = None, reverse: bool = False) -> list[dict]:
+        """
+        Retrieves the commit history.
+
+        Args:
+            limit: Maximum number of log entries to return.
+            reverse: If True, returns history in chronological order (oldest first).
+                     Default is False (newest first).
+        """
+        self._load_head()
+        if not self.head_info:
+            return []
+
+        history = []
+        curr_block = self.head_info
+
+        while curr_block:
+            # Extract metadata
+            meta = {
+                "ver": curr_block.get("ver"),
+                "date": curr_block.get("date"),
+                "author": curr_block.get("author"),
+                "log": curr_block.get("log"),
+            }
+            history.append(meta)
+
+            if limit and len(history) >= limit:
+                break
+
+            prev_block = self._get_prev_block(curr_block['start'])
+            if not prev_block:
+                break
+            curr_block = prev_block
+
+        if reverse:
+            return history[::-1]
+        return history
+
+    def diff(self, ver_a: str, ver_b: str) -> str:
+        """
+        Generates a unified diff between two versions.
+
+        Args:
+            ver_a: The version number to compare from (source).
+            ver_b: The version number to compare to (target).
+
+        Returns:
+            A string containing the unified diff.
+        """
+        content_a = self.checkout(ver_a)
+        content_b = self.checkout(ver_b)
+
+        if content_a is None or content_b is None:
+             raise ValueError("One or both versions could not be found.")
+
+        lines_a = content_a.splitlines(keepends=True)
+        lines_b = content_b.splitlines(keepends=True)
+
+        diff_lines = difflib.unified_diff(
+            lines_a,
+            lines_b,
+            fromfile=f"Version {ver_a}\n",
+            tofile=f"Version {ver_b}\n",
+            lineterm="",
+        )
+
+        return "".join(diff_lines)
