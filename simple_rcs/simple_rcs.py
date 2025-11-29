@@ -603,9 +603,13 @@ class SimpleRCS:
 
         return "".join(diff_lines)
 
-    def blame(self) -> list[dict]:  # noqa: C901
+    def blame(self, depth: int | None = None) -> list[dict]:  # noqa: C901
         """
         Annotates each line of the HEAD version with the revision that last modified it.
+
+        Args:
+            depth: If provided, limits the backward traversal to this many versions.
+                   Lines older than this depth will be blamed on the oldest reached version.
 
         Returns:
             A list of dicts, where each dict corresponds to a line in HEAD and contains:
@@ -642,9 +646,25 @@ class SimpleRCS:
         final_blame = [None] * len(head_lines)
 
         curr_block = self.head_info
+        curr_depth = 0
 
         # 2. Traverse backwards
         while curr_block:
+            # Check depth limit
+            if depth is not None and curr_depth >= depth:
+                # Reached depth limit.
+                # Blame remaining non-finalized lines on the current block (oldest reached).
+                reached_commit = {
+                    'ver': curr_block['ver'],
+                    'author': curr_block['author'],
+                    'date': curr_block['date'],
+                }
+                for item in tracker:
+                    if item['head_index'] is not None:
+                        if final_blame[item['head_index']] is None:
+                            final_blame[item['head_index']] = reached_commit
+                break
+
             prev_block = self._get_prev_block(curr_block['start'])
 
             if not prev_block:
@@ -727,6 +747,7 @@ class SimpleRCS:
                 item['blame'] = prev_commit
 
             curr_block = prev_block
+            curr_depth += 1
 
         # 3. Construct Result
         result = []
