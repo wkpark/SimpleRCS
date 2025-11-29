@@ -602,3 +602,146 @@ class SimpleRCS:
         )
 
         return "".join(diff_lines)
+
+    def blame(self) -> list[dict]:  # noqa: C901
+        """
+        Annotates each line of the HEAD version with the revision that last modified it.
+
+        Returns:
+            A list of dicts, where each dict corresponds to a line in HEAD and contains:
+            {
+                'line': str (content),
+                'ver': str (version),
+                'author': str,
+                'date': str
+            }
+        """
+        self._load_head()
+        if not self.head_info:
+            return []
+
+        head_text = self.head_info['text']
+        head_lines = head_text.splitlines(keepends=True)
+
+        # 1. Initialize tracker
+        # Each item: {'head_index': int|None, 'blame': dict}
+        # head_index maps to the index in the final output. None means it's a ghost line.
+        current_commit = {
+            'ver': self.head_info['ver'],
+            'author': self.head_info['author'],
+            'date': self.head_info['date'],
+        }
+
+        tracker = []
+        for i in range(len(head_lines)):
+            tracker.append({
+                'head_index': i,
+                'blame': current_commit,
+            })
+
+        final_blame = [None] * len(head_lines)
+
+        curr_block = self.head_info
+
+        # 2. Traverse backwards
+        while curr_block:
+            prev_block = self._get_prev_block(curr_block['start'])
+
+            if not prev_block:
+                # Reached start (Ver 1.0).
+                # All remaining non-ghost lines in tracker originate here.
+                first_commit = {
+                    'ver': curr_block['ver'],
+                    'author': curr_block['author'],
+                    'date': curr_block['date'],
+                }
+                for item in tracker:
+                    if item['head_index'] is not None:
+                        # If not already finalized (shouldn't happen if logic is correct, but for safety)
+                        if final_blame[item['head_index']] is None:
+                            final_blame[item['head_index']] = first_commit
+                break
+
+            prev_commit = {
+                'ver': prev_block['ver'],
+                'author': prev_block['author'],
+                'date': prev_block['date'],
+            }
+
+            # Parse Delta (Current -> Prev)
+            delta = prev_block['text']
+            script_lines = delta.splitlines()
+
+            commands = []
+            i = 0
+            while i < len(script_lines):
+                header = script_lines[i]
+                i += 1
+                parts = header.split()
+                if not parts:
+                    continue
+                cmd = parts[0][0]
+                if cmd not in ('d', 'a'):
+                    continue
+                try:
+                    start = int(parts[0][1:])
+                    count = int(parts[1])
+                except Exception as _:
+                    continue
+
+                if cmd == 'a':
+                    for _ in range(count):
+                        if i < len(script_lines):
+                            i += 1 # Skip payload lines
+
+                commands.append({'cmd': cmd, 'start': start, 'count': count})
+
+            # Sort descending to handle list mutations
+            commands.sort(key=lambda x: x['start'], reverse=True)
+
+            for c in commands:
+                idx = c['start']
+                if c['cmd'] == 'd':
+                    # Delete lines starting at idx (1-based) -> list index idx-1
+                    # These lines were born in Current.
+                    list_idx = idx - 1
+
+                    # These items are being removed from history.
+                    # Their journey ends here. Finalize their blame.
+                    removed_items = tracker[list_idx : list_idx + c['count']]
+                    for item in removed_items:
+                        if item['head_index'] is not None:
+                            final_blame[item['head_index']] = item['blame']
+
+                    del tracker[list_idx : list_idx + c['count']]
+
+                elif c['cmd'] == 'a':
+                    # Add lines to Prev.
+                    # These lines don't exist in Current, so they are ghosts.
+                    insert_idx = idx
+                    ghost_items = [{'head_index': None, 'blame': prev_commit} for _ in range(c['count'])]
+                    tracker[insert_idx:insert_idx] = ghost_items
+
+            # Update blame for surviving items to Previous
+            for item in tracker:
+                item['blame'] = prev_commit
+
+            curr_block = prev_block
+
+        # 3. Construct Result
+        result = []
+        for i, line in enumerate(head_lines):
+            info = final_blame[i]
+            if info is None:
+                # Should not happen, but fallback
+                info = current_commit
+
+            result.append({
+                'line': line.rstrip('\n'),
+                'ver': info['ver'],
+                'author': info['author'],
+                'date': info['date'],
+            })
+
+        return result
+
