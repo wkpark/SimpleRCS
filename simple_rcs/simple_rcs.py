@@ -798,6 +798,12 @@ class SimpleRCS:
                 "author": curr_block.get("author"),
                 "log": curr_block.get("log"),
             }
+            # Add v2 fields if present
+            if self._version >= 2:
+                meta["hash"] = curr_block.get("hash")
+                meta["prev_hash"] = curr_block.get("prev_hash")
+                meta["signatures"] = curr_block.get("signatures", []) # List of signature strings
+
             history.append(meta)
 
             if limit and len(history) >= limit:
@@ -1005,7 +1011,7 @@ class SimpleRCS:
 
         return result
 
-    def sign_head(self, signer_callbacks: list[Callable[[str], tuple[str, str]]]) -> bool:
+    def sign_head(self, signer_callbacks: list[Callable[[str], tuple[str, str]]]) -> bool:  # noqa: C901
         """
         Adds signatures to the current HEAD block.
         This is possible because signatures are not part of the hash calculation.
@@ -1059,9 +1065,29 @@ class SimpleRCS:
                     logger.warning(f"Warning: Signing callback failed for message '{msg_to_sign}': {e}")
                     return False # Fail if any callback fails
 
-        # Merge with existing signatures
+        # Merge with existing signatures (Deduplicate by signer_id)
         existing_signatures = self.head_info.get('signatures', [])
-        all_signatures = existing_signatures + new_signatures
+
+        # Use a dict to map signer_id -> signature_entry to ensure uniqueness
+        # Latest signature (from new_signatures) overwrites existing ones
+        sig_map = {}
+
+        # 1. Load existing signatures
+        for sig in existing_signatures:
+            parts = sig.split('|')
+            if len(parts) >= 1:
+                signer_id = parts[0]
+                sig_map[signer_id] = sig
+
+        # 2. Apply new signatures (overwrite if exists)
+
+        for sig in new_signatures:
+            parts = sig.split('|')
+            if len(parts) >= 1:
+                signer_id = parts[0]
+                sig_map[signer_id] = sig
+
+        all_signatures = list(sig_map.values())
 
         # Prepare block data for rewriting HEAD
         # We need to use the original data (with Full Text) but replace its 'text' with delta if it were historical.
@@ -1089,6 +1115,47 @@ class SimpleRCS:
         self._load_head()
 
         return True
+
+    def verify_block_signature(
+        self,
+        block_data: dict,
+        verifier_callback: Callable[[str, str, str], bool],
+    ) -> tuple[bool, str | None]:
+        """
+        Verifies signatures of a single block data dict.
+
+        Args:
+            block_data: The block data dictionary (from log or internal storage).
+            verifier_callback: Function to verify (signer_id, message, signature).
+
+        Returns:
+            (True, signer_id) if a valid signature is found.
+            (False, None) otherwise.
+        """
+        signatures = block_data.get('signatures', [])
+        stored_hash = block_data.get('hash')
+
+        if not signatures or not stored_hash:
+            return False, None
+
+        for sig_entry in signatures:
+            try:
+                parts = sig_entry.split('|')
+                if len(parts) < 3:
+                    continue
+                signer_id = parts[0]
+                timestamp = parts[1]
+                sig_val = "|".join(parts[2:]) # Handle potential | in signature
+
+                # Reconstruct message used for signing
+                msg = f"{timestamp}|{stored_hash}"
+
+                if verifier_callback(signer_id, msg, sig_val):
+                    return True, signer_id
+            except Exception as _e:
+                return False, signer_id
+
+        return False, None
 
     def verify(self, verifier_callbacks: list[Callable[[str, str, str], bool]] | None = None) -> bool:  # noqa: C901
         """
