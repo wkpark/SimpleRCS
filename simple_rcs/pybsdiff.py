@@ -77,7 +77,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
     matcher = StreamSequenceMatcher(old_stream, new_stream, chunk_size=chunk_size)
 
     # Buffers for Ctrl, Diff, Extra blocks
-    ctrl_values = []
+    ctrl_tuples = []
     diff_buf = io.BytesIO()
     extra_buf = io.BytesIO()
 
@@ -95,9 +95,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
             # Check flush: Diff -> Extra -> Seek
             # If we have pending Extra or Seek, we must flush current tuple
             if current_extra_len > 0 or current_seek_len != 0:
-                ctrl_values.append(_write_off_t(current_diff_len))
-                ctrl_values.append(_write_off_t(current_extra_len))
-                ctrl_values.append(_write_off_t(current_seek_len))
+                ctrl_tuples.append((current_diff_len, current_extra_len, current_seek_len))
                 diff_buf.write(curr_diff_data)
                 extra_buf.write(curr_extra_data)
 
@@ -117,9 +115,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
         elif tag == 'replace':
             # Check flush
             if current_extra_len > 0 or current_seek_len != 0:
-                ctrl_values.append(_write_off_t(current_diff_len))
-                ctrl_values.append(_write_off_t(current_extra_len))
-                ctrl_values.append(_write_off_t(current_seek_len))
+                ctrl_tuples.append((current_diff_len, current_extra_len, current_seek_len))
                 diff_buf.write(curr_diff_data)
                 extra_buf.write(curr_extra_data)
                 current_diff_len = 0
@@ -158,9 +154,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
         elif tag == 'insert':
             # Check flush: if pending Seek, must flush
             if current_seek_len != 0:
-                ctrl_values.append(_write_off_t(current_diff_len))
-                ctrl_values.append(_write_off_t(current_extra_len))
-                ctrl_values.append(_write_off_t(current_seek_len))
+                ctrl_tuples.append((current_diff_len, current_extra_len, current_seek_len))
                 diff_buf.write(curr_diff_data)
                 extra_buf.write(curr_extra_data)
                 current_diff_len = 0
@@ -181,14 +175,25 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
 
     # Final flush
     if current_diff_len > 0 or current_extra_len > 0 or current_seek_len != 0:
-        ctrl_values.append(_write_off_t(current_diff_len))
-        ctrl_values.append(_write_off_t(current_extra_len))
-        ctrl_values.append(_write_off_t(current_seek_len))
+        ctrl_tuples.append((current_diff_len, current_extra_len, current_seek_len))
         diff_buf.write(curr_diff_data)
         extra_buf.write(curr_extra_data)
 
+    # --- 2nd Pass: Optimization ---
+    # Optimize "Insert then Delete" patterns into "Diff" (Replace)
+    # This converts Literal data (Extra) into Difference data (Diff), which compresses better.
+
+    ctrl_tuples, diff_buf, extra_buf = _optimize_patch(ctrl_tuples, diff_buf, extra_buf, old_stream)
+
+    # Serialize Ctrl block
+    ctrl_buf = io.BytesIO()
+    for d, e, s in ctrl_tuples:
+        ctrl_buf.write(_write_off_t(d))
+        ctrl_buf.write(_write_off_t(e))
+        ctrl_buf.write(_write_off_t(s))
+
     # Compress blocks
-    compressed_ctrl = bz2.compress(b"".join(ctrl_values))
+    compressed_ctrl = bz2.compress(ctrl_buf.getvalue())
     compressed_diff = bz2.compress(diff_buf.getvalue())
     compressed_extra = bz2.compress(extra_buf.getvalue())
 
@@ -200,7 +205,104 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
 
     return header + compressed_ctrl + compressed_diff + compressed_extra
 
-def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
+def _optimize_patch(ctrl_tuples, diff_buf, extra_buf, old_stream):
+    """
+    Optimizes patch by merging Extra+Seek (Insert+Delete) into Diff (Replace).
+    This improves compression if the inserted data is similar to the deleted data.
+    """
+    new_ctrls = []
+    new_diff = io.BytesIO()
+    new_extra = io.BytesIO()
+
+    diff_data = diff_buf.getvalue()
+    extra_data = extra_buf.getvalue()
+
+    diff_ptr = 0
+    extra_ptr = 0
+    old_pos = 0
+
+    for d_len, e_len, s_len in ctrl_tuples:
+        # Copy existing diff data
+        if d_len > 0:
+            new_diff.write(diff_data[diff_ptr : diff_ptr + d_len])
+            diff_ptr += d_len
+            old_pos += d_len
+
+        # Check optimization candidate: Extra > 0 and Seek > 0
+        # This means we inserted something and skipped something in old.
+        # If they are roughly same size, it might be a modification.
+
+        # Heuristic: merge if lengths are close (e.g. within 50%) and size is significant
+        is_mergeable = False
+        if e_len > 0 and s_len > 0:
+            # Check overlapping length
+            overlap_len = min(e_len, s_len)
+            # Only optimize if it's worth it (e.g. > 8 bytes)
+            if overlap_len > 8:
+                 is_mergeable = True
+
+        if is_mergeable:
+            # Perform merge
+            # 1. Read Extra data (New)
+            chunk_new = extra_data[extra_ptr : extra_ptr + overlap_len]
+
+            # 2. Read Old data (skipped part)
+            old_stream.seek(old_pos)
+            chunk_old = old_stream.read(overlap_len)
+
+            # 3. Calculate Diff
+            # If old read failed (EOF), we can't diff.
+            real_overlap = min(len(chunk_new), len(chunk_old))
+
+            if real_overlap > 0:
+                # Append to Diff block
+                # new_diff is currently at end of original diff.
+                # We effectively extend the *current* diff_len.
+
+                # Optimization: vectorized sub/add is slow in python loop.
+                # But for optimization pass, it's okay.
+                merged_diff = bytearray(real_overlap)
+                for k in range(real_overlap):
+                    merged_diff[k] = (chunk_new[k] - chunk_old[k]) & 0xFF
+                new_diff.write(merged_diff)
+
+                # Adjust lengths
+                # Previous d_len increased by real_overlap
+                # e_len decreased by real_overlap
+                # s_len decreased by real_overlap (we consumed it).
+
+                # But wait, we already wrote d_len. We need to update the *tuple*.
+                # Since we are building new_ctrls, we can modify the values we write.
+
+                # The current tuple (d, e, s) becomes:
+                # (d + overlap, e - overlap, s - overlap)
+
+                # But we already wrote d_len's data to new_diff.
+                # We just appended overlap data. So new d_len is correct.
+
+                d_len += real_overlap
+
+                # Advance pointers for consumed extra
+                extra_ptr += real_overlap
+                e_len -= real_overlap
+
+                # Advance old_pos (consumed by diff)
+                old_pos += real_overlap
+                s_len -= real_overlap
+
+        # Write remaining Extra data
+        if e_len > 0:
+            new_extra.write(extra_data[extra_ptr : extra_ptr + e_len])
+            extra_ptr += e_len
+
+        # s_len is just a number, no data to copy.
+        old_pos += s_len # Virtual seek
+
+        new_ctrls.append((d_len, e_len, s_len))
+
+    return new_ctrls, new_diff, new_extra
+
+def patch(old: bytes, patch_data: bytes) -> bytes:
     """
     Applies a binary patch in BSDIFF40 format.
     """
