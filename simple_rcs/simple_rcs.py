@@ -8,6 +8,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import BinaryIO
 
+from src.app.common.pydifflib import StreamSequenceMatcher
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +53,14 @@ class SimpleRCS:
         -   Supports v2 format with configurable hash algorithms (default SHA-256).
         -   Each block contains a `hash` of its content (Full Text + Metadata) and the `prev_hash`.
         -   This ensures tamper-evidence. Changing any past version breaks the chain.
+
+    7.  **Intermediate Snapshots (New in v2.1):**
+        -   Supports storing full text snapshots at intermediate versions.
+        -   This allows faster retrieval of historical versions by breaking the delta chain.
+        -   Snapshots are marked by the `text` keyword (instead of `delta`).
     """
 
-    def __init__(self, content_or_path: str | bytes | BinaryIO | None = None, hash_algo: str = "sha256") -> None:
+    def __init__(self, content_or_path: str | bytes | BinaryIO | None = None, hash_algo: str = "sha256") -> None:  # noqa: C901
         """
         Initializes the SimpleRCS instance.
 
@@ -72,6 +79,7 @@ class SimpleRCS:
         self.owns_handle = False # Flag to indicate if we opened the file handle and should close it
         self._version = 1 # Default to v1
         self._hash_algo = hash_algo
+        self.encoding = 'utf-8'
 
         # Validate hash_algo early
         if hash_algo not in hashlib.algorithms_available:
@@ -91,20 +99,29 @@ class SimpleRCS:
             if os.path.exists(content_or_path) or (
                     not content_or_path.startswith(('@', 'ver', '#')) and '\n' not in content_or_path):
                 # Assume file path
-                mode = "rb+" if os.path.exists(content_or_path) else "wb+"
+                is_existing = os.path.exists(content_or_path)
+                mode = "rb+" if is_existing else "wb+"
                 self.stream = open(content_or_path, mode)
                 self.file_path = content_or_path
                 self.owns_handle = True
 
+                # Check if file is empty
+                is_empty = False
+                if is_existing:
+                    self.stream.seek(0, os.SEEK_END)
+                    if self.stream.tell() == 0:
+                        is_empty = True
+                    self.stream.seek(0)
+
                 # Check version for existing file, or init new file
-                if mode == "wb+":
+                if mode == "wb+" or is_empty:
                     self._write_v2_header()
                     self._version = 2
                 else:
                     self._version = self._detect_format_version()
             else:
                 # Treat as raw string content -> In-memory stream
-                self.stream = io.BytesIO(content_or_path.encode('utf-8'))
+                self.stream = io.BytesIO(content_or_path.encode(self.encoding))
                 self._version = self._detect_format_version()
                 self.owns_handle = True
         elif isinstance(content_or_path, bytes):
@@ -124,8 +141,8 @@ class SimpleRCS:
 
     def _write_v2_header(self) -> None:
         """Writes the v2 magic header with the chosen hash algorithm."""
-        header = f"# SimpleRCS v2.0; hash_algo={self._hash_algo};\n"
-        self.stream.write(header.encode('utf-8'))
+        header = f"# SimpleRCS v2.0; hash_algo={self._hash_algo}; encoding={self.encoding};\n"
+        self.stream.write(header.encode(self.encoding))
 
     def _detect_format_version(self) -> int:
         """
@@ -137,7 +154,7 @@ class SimpleRCS:
         # Read first line, handle potential binary data gracefully
         try:
             header_bytes = self.stream.readline()
-            header = header_bytes.decode('utf-8').strip()
+            header = header_bytes.decode(self.encoding).strip()
         except UnicodeDecodeError:
             header = ""
         finally:
@@ -148,12 +165,15 @@ class SimpleRCS:
             match = re.search(r'hash_algo=([^;]+)', header)
             if match:
                 algo = match.group(1).strip()
-                # Verify support (optional, but good for safety)
                 try:
                     hashlib.new(algo)
                     self._hash_algo = algo
                 except ValueError as e:
                     raise ValueError(f"Invalid hash algo {algo}") from e
+            # Parse encoding
+            match_encoding = re.search(r'encoding=([^;]+)', header)
+            if match_encoding:
+                self.encoding = match_encoding.group(1).strip()
             return 2
         return 1
 
@@ -182,7 +202,7 @@ class SimpleRCS:
         payload = f"{ver}|{date}|{author}|{log}|{text}|{p_hash}"
 
         hasher = hashlib.new(self._hash_algo)
-        hasher.update(payload.encode('utf-8'))
+        hasher.update(payload.encode(self.encoding))
         return hasher.hexdigest()
 
 
@@ -198,7 +218,7 @@ class SimpleRCS:
         """
         pos = self.stream.tell()
         self.stream.seek(0)
-        content = self.stream.read().decode('utf-8', errors='replace')
+        content = self.stream.read().decode(self.encoding, errors='replace')
         self.stream.seek(pos)
         return content
 
@@ -215,11 +235,11 @@ class SimpleRCS:
         Parses a raw block bytes into a dictionary.
         Format: key @value@; ...
         """
-        content_str = content_bytes.decode('utf-8', errors='replace')
+        content_str = content_bytes.decode(self.encoding, errors='replace')
         data = {}
         # Regex matches keys (ver, date, etc.) and values enclosed in @...@
         # Use re.DOTALL to match newlines within @...@
-        pattern = re.compile(r'(ver|version|date|author|log|text)\s+@((?:[^@]|@@)*)@;', re.DOTALL)
+        pattern = re.compile(r'(ver|version|date|author|log|text|delta)\s+@((?:[^@]|@@)*)@;', re.DOTALL)
 
         # Iterate over all matches to build the data dictionary
         for match in pattern.finditer(content_str):
@@ -227,10 +247,24 @@ class SimpleRCS:
             value = self._unescape(match.group(2))
             if key == 'version':
                 key = 'ver' # Normalize key
-            data[key] = value
+
+            if key == 'delta':
+                data['text'] = value
+                data['is_delta'] = True
+            elif key == 'text':
+                data['text'] = value
+                data['is_delta'] = False
+            elif key == 'signature':
+                if 'signatures' not in data:
+                    data['signatures'] = []
+                data['signatures'].append(value)
+            else:
+                data[key] = value
 
         # Basic validation to ensure it looks like a valid block
         if 'ver' in data:
+            if 'is_delta' not in data:
+                data['is_delta'] = False # Default assumption for old parser
             return data
         return {}
 
@@ -243,7 +277,9 @@ class SimpleRCS:
         """
         # Define keywords as bytes for direct comparison
         # Added v2 keywords: prev_hash, hash, signature
-        _keywords = [b'ver', b'version', b'date', b'author', b'log', b'text', b'prev_hash', b'hash', b'signature']
+        # Added 'delta' for mixed snapshot support
+        _keywords = [b'ver', b'version', b'date',
+            b'author', b'log', b'text', b'delta', b'prev_hash', b'hash', b'signature']
 
         content = content_bytes
         length = len(content)
@@ -298,7 +334,7 @@ class SimpleRCS:
                     break
 
             value_bytes = b"".join(val_parts)
-            value = value_bytes.decode('utf-8', errors='replace')
+            value = value_bytes.decode(self.encoding, errors='replace')
 
             # Skip whitespace after value
             while pos < length and content[pos] in b' \t\r\n':
@@ -312,11 +348,17 @@ class SimpleRCS:
                 break
 
             # Store data
-            key_str = key_bytes.decode('utf-8')
+            key_str = key_bytes.decode(self.encoding)
             if key_str == 'version':
                 key_str = 'ver' # Normalize key
 
-            if key_str == 'signature':
+            if key_str == 'delta':
+                data['text'] = value
+                data['is_delta'] = True
+            elif key_str == 'text':
+                data['text'] = value
+                data['is_delta'] = False
+            elif key_str == 'signature':
                 # Handle multiple signatures
                 if 'signatures' not in data:
                     data['signatures'] = []
@@ -326,6 +368,8 @@ class SimpleRCS:
 
         # Basic validation to ensure it looks like a valid block
         if 'ver' in data:
+            if 'is_delta' not in data:
+                data['is_delta'] = False # Default if not specified (backward compat)
             return data
         return {}
 
@@ -436,9 +480,10 @@ class SimpleRCS:
         Because we store HEAD as Full Text. To get the previous version, we need
         to apply a patch to HEAD that turns it back into the previous version.
         """
-        new_lines = new_text.splitlines(keepends=True)
-        old_lines = old_text.splitlines(keepends=True)
-        matcher = difflib.SequenceMatcher(None, new_lines, old_lines)
+        new_stream = io.BytesIO(new_text.encode(self.encoding))
+        old_stream = io.BytesIO(old_text.encode(self.encoding))
+
+        matcher = StreamSequenceMatcher(new_stream, old_stream, encoding=self.encoding, chunk_size=None)
         output = []
 
         # opcodes: describes how to turn 'a' (New) into 'b' (Old)
@@ -446,27 +491,46 @@ class SimpleRCS:
             if tag == 'equal':
                 continue
 
-            # RCS diff format logic (similar to PHP's DeltaDiffFormatter)
+            # RCS diff format logic
+            # indices are line numbers because chunk_size=None
             xlen = i2 - i1
             ylen = j2 - j1
             xbeg = i1 + 1
 
             del_cmd = f"d{xbeg} {xlen}"
-            # For add command index: append after the last line of the changed block
-            add_idx = xbeg + xlen - 1
-            add_cmd = f"a{add_idx} {ylen}"
+
+            # For insert/replace, we add lines after a certain point.
+            # RCS 'a' command adds AFTER the specified line index of the input file.
+            # If we delete lines, the line numbers shift? No, RCS commands refer to the original state.
+
+            # Logic derived from SimpleRCS original (which matched PHP DeltaDiff):
+            # add_idx = xbeg + xlen - 1
 
             if xlen > 0:
                 output.append(del_cmd)
-                if ylen > 0:
-                    output.append(add_cmd)
-                    for line in old_lines[j1:j2]:
-                        output.append(line.rstrip('\n'))
-            else:
-                # Insert-only operation: only add command
+
+            if ylen > 0:
+                if xlen > 0:
+                    add_idx = xbeg + xlen - 1 # i2
+                else:
+                    add_idx = i1 # If insert only (xlen=0), append after i1 (which is xbeg-1)
+
+                add_cmd = f"a{add_idx} {ylen}"
                 output.append(add_cmd)
-                for line in old_lines[j1:j2]:
-                    output.append(line.rstrip('\n'))
+
+                # Get actual lines from B (old_text)
+                # 'matcher' has b_stream as old_stream.
+                # We need to read lines j1 to j2.
+                # StreamSequenceMatcher.get_lines_from_stream works with indices in Line Mode.
+
+                # Note: get_lines_from_stream expects 'a' or 'b' as first arg to identify stream
+                # In StreamSequenceMatcher.__init__, set_seq2 sets self.b_stream.
+                # get_lines_from_stream uses self.b_stream if type != 'a'.
+
+                lines_b = matcher.get_lines_from_stream('b', j1, j2)
+                for line in lines_b:
+                    output.append(line.decode(self.encoding).rstrip('\n'))
+
         return "\n".join(output)
 
     def _apply_reverse_delta(self, current_text: str, delta_text: str) -> str:  # noqa: C901
@@ -537,16 +601,22 @@ class SimpleRCS:
         current_hash: str | None = None,
         prev_hash: str | None = None,
         signatures: list[str] | None = None,
+        is_delta: bool = False,
     ) -> bytes:
         """
         Formats a block dictionary into bytes for writing to the stream.
         Supports v2 fields (hash, prev_hash, signatures).
         """
-        keys = ["ver", "date", "author", "log", "text"]
+        keys = ["ver", "date", "author", "log"]
         lines = []
         for key in keys:
             val = self._escape(str(data.get(key, "")))
             lines.append(f"{key} @{val}@;")
+
+        # Determine content key: 'delta' for deltas, 'text' for snapshots/full-text
+        content_key = "delta" if is_delta else "text"
+        val = self._escape(str(data.get("text", "")))
+        lines.append(f"{content_key} @{val}@;")
 
         # Add v2 fields if present
         if self._version >= 2:
@@ -568,6 +638,7 @@ class SimpleRCS:
         log: str = "",
         signer_callbacks: list[Callable[[str], tuple[str, str]]] | None = None,
         date: str | None = None,
+        snapshot: bool = False,
     ) -> str:
         """
         Commits new content as the latest version.
@@ -581,11 +652,9 @@ class SimpleRCS:
         Args:
             signer_callbacks: List of functions for v2 signing.
                               Each accepts a message (str) and returns (signer_id, signature_value).
-            data: Optional timestamp string.
-
-        Returns:
-            The new version number (e.g., "1.2") if working with a file path.
-            The full RCS content string if working with an in-memory stream.
+            snapshot: If True, the previous HEAD (Old Block) is saved as Full Text
+                      instead of being converted to a delta. This creates an
+                      intermediate snapshot for faster retrieval.
         """
         self._load_head() # Refresh HEAD info by scanning the stream
         now = date if date else datetime.now().isoformat()
@@ -617,7 +686,8 @@ class SimpleRCS:
                         signatures.append(f"{signer_id}|{sig_ts}|{sig_val}")
 
             self.stream.seek(0, os.SEEK_END) # Append to end
-            self.stream.write(self._format_block(block_data, current_hash=curr_hash, signatures=signatures))
+            self.stream.write(self._format_block(
+                block_data, current_hash=curr_hash, signatures=signatures, is_delta=False))
 
             if isinstance(self.stream, io.BytesIO):
                 return self.get_content()
@@ -627,17 +697,21 @@ class SimpleRCS:
         head = self.head_info
         head_content = head["text"]
 
-        # 1. Compute Reverse Delta: New Content (Vn+1) -> Old Head Content (Vn)
-        delta = self._generate_reverse_delta(content, head_content)
-
-        # 2. Prepare blocks for writing
-
-        # [Old Block (Vn)]
-        # Becomes a Delta block.
-        # Ideally, we preserve its original hash and signatures because they represent the Logical Full Text.
-        # self.head_info already contains 'hash' and 'signatures' if parsed correctly from v2 file.
+        # 1. Prepare Old Block (Vn)
         head_block_data = head.copy()
-        head_block_data["text"] = delta
+
+        # Decide whether to save as Delta or Full Text Snapshot
+        is_delta_block = True
+
+        if snapshot:
+            # Snapshot mode: Keep Old Block as Full Text
+            is_delta_block = False
+            # text is already set to full text in head_block_data
+        else:
+            # Standard mode: Compute Reverse Delta: New Content (Vn+1) -> Old Head Content (Vn)
+            delta = self._generate_reverse_delta(content, head_content)
+            head_block_data["text"] = delta
+            is_delta_block = True
 
         # Cleanup internal metadata
         if "start" in head_block_data:
@@ -646,15 +720,9 @@ class SimpleRCS:
             del head_block_data["end"]
         # In v2, we must preserve 'hash', 'prev_hash', 'signatures' from the original head block.
         # They should already be in head_block_data if _parse_block_content_no_regex loaded them.
-        # We need to extract them to pass to _format_block explicit args, or update _format_block to look in data?
-        # _format_block takes explicit args for these.
-        # Let's extract them.
         old_prev_hash = head_block_data.get("prev_hash")
         old_curr_hash = head_block_data.get("hash")
         old_signatures = head_block_data.get("signatures")
-
-        # Remove them from data dict so they don't get duplicated or mishandled by _format_block's generic loop
-        # (Though _format_block only iterates specific keys 'ver'...'text', so extra keys in dict are ignored. Safe.)
 
         # The new HEAD block (Vn+1) is Full Text.
         # Increment version: 1.9 -> 1.10 (RCS style), not 2.0 (Float style)
@@ -676,21 +744,10 @@ class SimpleRCS:
         new_signatures = []
 
         if self._version >= 2:
-            # New block's prev_hash is the Old Block's hash (which represents its Full Text state)
-            # If Old Block was v1, it might not have a hash. We might need to compute it now?
-            # If we are migrating or mixing, this is tricky.
-            # But our policy: "v1 file keeps v1". "v2 file has hashes".
-            # So if self._version >= 2, Old Block MUST have a hash (unless it's the genesis block of a v2 file?).
-            # Wait, if we just upgraded code but file is v2, head should have hash.
-
             if old_curr_hash:
                 new_prev_hash = old_curr_hash
             else:
                 # Fallback: if old block didn't have hash (maybe corrupted v2?), compute it now based on OLD FULL TEXT
-                # We have 'head' (Full Text) in memory.
-                # prev_hash for Old Block? We might need to look it up.
-                # Simplified: If missing, treat as empty chain start or error?
-                # Let's compute it.
                 new_prev_hash = self._calculate_block_hash(head, prev_hash=old_prev_hash)
 
             # Calculate New Block Hash
@@ -706,14 +763,13 @@ class SimpleRCS:
 
         # 3. Write to stream
 
-        # Overwrite Old Block (as Delta)
-        # We pass the ORIGINAL hash/sig info to preserve it.
-        # Even though text is now Delta, the Hash represents the Full Text version of this block.
+        # Overwrite Old Block
         old_block_bytes = self._format_block(
             head_block_data,
             current_hash=old_curr_hash,
             prev_hash=old_prev_hash,
             signatures=old_signatures,
+            is_delta=is_delta_block,
         )
 
         # Append New Block (Full Text)
@@ -722,6 +778,7 @@ class SimpleRCS:
             current_hash=new_curr_hash,
             prev_hash=new_prev_hash,
             signatures=new_signatures,
+            is_delta=False, # HEAD is always Full Text
         )
 
         self.stream.seek(self.head_info['start'])
@@ -761,10 +818,16 @@ class SimpleRCS:
                 # Reached the first block in history without finding target
                 raise ValueError(f"Version '{ver_num}' not found in history (reached start of file).")
 
-            # Apply delta: prev_block contains the delta to transform curr_text to prev_text
-            # (Strictly speaking, V_prev contains delta to go from V_curr to V_prev)
-            delta = prev_block["text"]
-            curr_text = self._apply_reverse_delta(curr_text, delta)
+            # Check if prev_block is a Snapshot (Full Text) or Delta
+            if not prev_block.get('is_delta', True): # Default to True (delta) if flag missing
+                # It's a snapshot! We can jump directly to this content.
+                curr_text = prev_block["text"]
+            else:
+                # It's a delta. Apply it.
+                # prev_block contains the delta to transform curr_text to prev_text
+                # (Strictly speaking, V_prev contains delta to go from V_curr to V_prev)
+                delta = prev_block["text"]
+                curr_text = self._apply_reverse_delta(curr_text, delta)
 
             # Check if this is our target version
             if prev_block["ver"] == ver_num:
@@ -1252,9 +1315,13 @@ class SimpleRCS:
                 # Let's verify it in the next iteration:
                 # "Next iteration's calculated hash must equal This iteration's stored_prev_hash"
 
-                # Apply delta to get Full Text of Previous Version
-                delta = prev_block['text']
-                curr_text = self._apply_reverse_delta(curr_text, delta)
+                # Apply delta to get Full Text of Previous Version (or use Snapshot)
+                # MODIFIED: Handle snapshots during verification
+                if not prev_block.get('is_delta', True):
+                    curr_text = prev_block['text'] # Snapshot: Reset text
+                else:
+                    delta = prev_block['text']
+                    curr_text = self._apply_reverse_delta(curr_text, delta)
 
                 # We need to temporarily peek/calculate prev_block's hash to verify the link NOW?
                 # Or just verify it when we become 'prev_block'.
