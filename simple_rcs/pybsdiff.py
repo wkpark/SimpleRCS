@@ -2,7 +2,7 @@ import bz2
 import io
 import logging
 
-from src.app.common.pydifflib import StreamSequenceMatcher
+from src.app.common.pydifflib import RollingHashMatcher, StreamSequenceMatcher
 
 
 logger = logging.getLogger(__name__)
@@ -52,9 +52,16 @@ def _write_off_t(value: int) -> bytes:
     data[7] |= sign
     return bytes(data)
 
-def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
+def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'default') -> bytes:  # noqa: C901
     """
-    Generates a binary patch in BSDIFF40 format using StreamSequenceMatcher.
+    Generates a binary patch in BSDIFF40 format.
+
+    Args:
+        old: Original binary data.
+        new: New binary data.
+        chunk_size: Block size for matching (default 64).
+        matcher_type: Algorithm to use ('default'/'stream' for fast hash matching,
+                      'rolling' for rsync-like rolling hash matching).
 
     The BSDIFF40 format consists of a Header and three compressed blocks:
     1.  **Ctrl Block**: A sequence of tuples (diff_len, extra_len, seek_len).
@@ -73,8 +80,12 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64) -> bytes:  # noqa: C901
     old_stream = io.BytesIO(old)
     new_stream = io.BytesIO(new)
 
-    # Use StreamSequenceMatcher for byte-level diffing
-    matcher = StreamSequenceMatcher(old_stream, new_stream, chunk_size=chunk_size)
+    # Select Matcher
+    if matcher_type == 'rolling':
+        matcher = RollingHashMatcher(old_stream, new_stream, chunk_size=chunk_size)
+    else:
+        # Default to StreamSequenceMatcher (Fast Hash)
+        matcher = StreamSequenceMatcher(old_stream, new_stream, chunk_size=chunk_size)
 
     # Buffers for Ctrl, Diff, Extra blocks
     ctrl_tuples = []
@@ -302,7 +313,7 @@ def _optimize_patch(ctrl_tuples, diff_buf, extra_buf, old_stream):
 
     return new_ctrls, new_diff, new_extra
 
-def patch(old: bytes, patch_data: bytes) -> bytes:
+def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
     """
     Applies a binary patch in BSDIFF40 format.
     """
