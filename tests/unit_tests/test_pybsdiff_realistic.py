@@ -102,7 +102,7 @@ def test_realistic_data_patch_size(tmp_path):
     print(f"Old Size: {len(old_data)} bytes ({len(old_data)/1024/1024:.2f} MB)")
     print(f"New Size: {len(new_data)} bytes")
 
-    # 2. Native bsdiff (Baseline)
+    # Native bsdiff (Baseline)
     patch_native = tmp_path / "patch.bs"
 
     start = time.perf_counter()
@@ -116,7 +116,7 @@ def test_realistic_data_patch_size(tmp_path):
 
     _analyze_patch_structure(patch_native.read_bytes(), "Native Patch")
 
-    # 3. pybsdiff (Chunk=64) - High overhead expected
+    # pybsdiff (Chunk=64) - High overhead expected
     start = time.perf_counter()
     patch_64 = diff(old_data, new_data, chunk_size=64)
     time_64 = time.perf_counter() - start
@@ -129,9 +129,24 @@ def test_realistic_data_patch_size(tmp_path):
 
     # Verify correctness
     assert patch(old_data, patch_64) == new_data
-    _analyze_patch_structure(patch_64, "pybsdiff (Chunk=4096)")
+    _analyze_patch_structure(patch_64, "pybsdiff (Chunk=64)")
 
-    # 4. pybsdiff (Chunk=4096) - Optimized for large files
+    # pybsdiff (Chunk=2048) - High overhead expected
+    start = time.perf_counter()
+    patch_2k = diff(old_data, new_data, chunk_size=2048)
+    time_2k = time.perf_counter() - start
+    size_2k = len(patch_2k)
+
+    print("\n[pybsdiff chunk=2048]")
+    print(f"Time: {time_2k:.4f}s")
+    print(f"Size: {size_2k} bytes")
+    print(f"Size Ratio (vs Native): {size_2k/native_size:.2f}x")
+
+    # Verify correctness
+    assert patch(old_data, patch_2k) == new_data
+    _analyze_patch_structure(patch_2k, "pybsdiff (Chunk=2048)")
+
+    # pybsdiff (Chunk=4096) - Optimized for large files
     # Larger chunks mean fewer control tuples => smaller patch size for large matches
     start = time.perf_counter()
     patch_4k = diff(old_data, new_data, chunk_size=4096)
@@ -146,7 +161,7 @@ def test_realistic_data_patch_size(tmp_path):
 
     _analyze_patch_structure(patch_4k, "pybsdiff (Chunk=4096)")
 
-    # 5. pybsdiff (Rolling Hash) - Optimized for shift/insert/delete
+    # pybsdiff (Rolling Hash) - Optimized for shift/insert/delete
     print(f"\n[pybsdiff Rolling Hash chunk=4096]")
     start = time.perf_counter()
     patch_rolling = diff(old_data, new_data, chunk_size=4096, matcher_type='rolling')
