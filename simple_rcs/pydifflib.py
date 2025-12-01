@@ -290,18 +290,24 @@ class StreamSequenceMatcher:
         a_idx = 0
         b_idx = 0
 
-        # Adaptive Anchor Length: Short for small files, long for large files (cap at 32)
-        MIN_MATCH_LEN = min(32, max(16, min(len_a, len_b) // 100))
+        # Adaptive anchor length heuristics
+        BASE_MIN_MATCH = 24 # Base minimum match length
 
-        # Search Window Limit (prevent looking too far for false positives)
-        MAX_SEARCH_DISTANCE = max(4096, min(len_a, len_b) // 4)
+        # Search window limit: Adaptive, capped at 1MB to balance performance and coverage.
+        # Uses a wider window (64KB base) for larger files, scaling up to 1MB.
+        MAX_SEARCH_DISTANCE = min(1024 * 1024, max(65536, min(len_a, len_b)))
 
         while b_idx < len_b and a_idx < len_a:
-            anchor_len = min(MIN_MATCH_LEN, len_b - b_idx)
+            # Dynamically adjust anchor length based on remaining data.
+            # This allows smaller matches towards the end of the data.
+            remaining = min(len_a - a_idx, len_b - b_idx)
+            current_min_match = max(12, min(BASE_MIN_MATCH, remaining // 64))
 
-            if anchor_len < MIN_MATCH_LEN // 2:
-                break # Remaining part is too small to anchor reliably
+            # Create anchor
+            anchor_len = min(current_min_match, len_b - b_idx)
 
+            if anchor_len < 8: # Break if anchor is too small to be reliable
+                break
             anchor_b = b[b_idx : b_idx + anchor_len]
 
             # Search for Anchor B in A (within window)
@@ -331,9 +337,9 @@ class StreamSequenceMatcher:
                 continue
 
             # Anchor B not found in A -> Try Reverse Search (Anchor A in B)
-            anchor_a_len = min(MIN_MATCH_LEN, len_a - a_idx)
+            anchor_a_len = min(current_min_match, len_a - a_idx)
 
-            if anchor_a_len >= MIN_MATCH_LEN // 2:
+            if anchor_a_len >= current_min_match // 2:
                 anchor_a = a[a_idx : a_idx + anchor_a_len]
                 search_end_b = min(len_b, b_idx + MAX_SEARCH_DISTANCE)
                 match_in_b = b.find(anchor_a, b_idx, search_end_b)
@@ -362,7 +368,7 @@ class StreamSequenceMatcher:
             # Both Failed -> Treat as Replace (Diff)
             # Adaptive Step: Proportional to remaining size
             remaining = min(len_a - a_idx, len_b - b_idx)
-            step = min(remaining, max(MIN_MATCH_LEN, remaining // 4))
+            step = min(remaining, max(current_min_match, remaining // 4))
 
             yield ('replace',
                    a_global_offset + a_idx, a_global_offset + a_idx + step,
