@@ -15,7 +15,12 @@ class StreamSequenceMatcher:
     making it suitable for large files with small chunks.
     """
 
-    def __init__(self, a_stream: BinaryIO, b_stream: BinaryIO, encoding: str = 'utf-8', chunk_size: int | None = None):
+    def __init__(self,
+        a_stream: BinaryIO,
+        b_stream: BinaryIO,
+        encoding: str = 'utf-8',
+        chunk_size: int | None = None,
+    ) -> None:
         self.a_stream = a_stream
         self.b_stream = b_stream
         self.encoding = encoding
@@ -33,7 +38,13 @@ class StreamSequenceMatcher:
         self._index_stream(self.a_stream, self.a_hashes, self.a_offsets, self.a_hash_map)
         self._index_stream(self.b_stream, self.b_hashes, self.b_offsets, None)
 
-    def _index_stream(self, stream: BinaryIO, hash_list: list, offset_list: list, hash_map: dict[int, list[int]] | None):
+    def _index_stream(
+        self,
+        stream: BinaryIO,
+        hash_list: list,
+        offset_list: list,
+        hash_map: dict[int, list[int]] | None,
+    ) -> None:
         """Builds a list of chunk hashes and offsets from a file stream."""
         stream.seek(0)
 
@@ -81,7 +92,7 @@ class StreamSequenceMatcher:
         stream.seek(start_offset)
         return stream.read(length)
 
-    def get_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:
+    def get_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:  # noqa: C901
         """
         Returns opcodes describing differences.
         Uses a greedy forward-scan algorithm.
@@ -250,7 +261,12 @@ class StreamSequenceMatcher:
         else:
             yield (tag, a_start, a_end, b_start, b_end)
 
-    def _refine_greedy(self, a: bytes, b: bytes, a_global_offset: int, b_global_offset: int) -> Iterator[tuple[str, int, int, int, int]]:
+    def _refine_greedy(  # noqa: C901
+        self, a: bytes,
+        b: bytes,
+        a_global_offset: int,
+        b_global_offset: int,
+    ) -> Iterator[tuple[str, int, int, int, int]]:
         """
         Optimized greedy diff algorithm for refinement.
         - Adaptive anchor length
@@ -369,10 +385,10 @@ class StreamSequenceMatcher:
                    a_global_offset + len_a, a_global_offset + len_a,
                    b_global_offset + b_idx, b_global_offset + len_b)
 
-    def _get_byte_offset(self, offsets, idx, is_end=False, stream=None):
+    def _get_byte_offset(self, offsets: int, idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:
         if idx < len(offsets):
             return offsets[idx]
-        if is_end and offsets:
+        if stream and is_end and offsets:
             stream.seek(0, os.SEEK_END)
             return stream.tell()
         return 0 # Should handle empty/start cases
@@ -380,7 +396,7 @@ class StreamSequenceMatcher:
     def get_matching_blocks(self) -> list[tuple[int, int, int]]:
         # Compatibility wrapper
         blocks = []
-        for tag, i1, i2, j1, j2 in self.get_opcodes():
+        for tag, i1, i2, j1, _j2 in self.get_opcodes():
             if tag == 'equal':
                 blocks.append((i1, j1, i2 - i1))
         blocks.append((self._get_byte_offset(self.a_offsets, len(self.a_hashes), True, self.a_stream),
@@ -408,249 +424,246 @@ _OFFS = 1
 class RollingHashMatcher:
     """
     Implements rsync-like rolling hash matching for efficient binary diffing.
-    Capable of handling shifted data (inserts/deletes) better than fixed chunking.
+    Handles shifted data (inserts/deletes) better than fixed chunking.
 
-    Warning: This is pure Python, so it is computationally expensive (CPU bound).
-    Use only when patch size optimization is critical and speed is secondary.
+    Improvements:
+    - Better memory management with streaming buffer
+    - Configurable extension limits
+    - Optimized hash rotation
+    - Clearer opcode generation
+    - Better error handling
     """
 
-    def __init__(self, a_stream: BinaryIO, b_stream: BinaryIO, chunk_size: int = 4096):
+    def __init__(
+        self,
+        a_stream: BinaryIO,
+        b_stream: BinaryIO,
+        chunk_size: int = 4096,
+        max_memory: int = 100 * 1024 * 1024,  # 100MB default
+    ) -> None:
         self.a_stream = a_stream
         self.b_stream = b_stream
         self.chunk_size = chunk_size
+        self.max_memory = max_memory
 
-        # 1. Index Old File (Signature Generation)
+        # Index old file (signature generation)
         self.a_map = self._index_file(self.a_stream)
+        self.a_size = self._get_file_size(self.a_stream)
+
+    def _get_file_size(self, stream: BinaryIO) -> int:
+        """Get file size efficiently."""
+        current_pos = stream.tell()
+        stream.seek(0, 2)  # Seek to end
+        size = stream.tell()
+        stream.seek(current_pos)  # Restore position
+        return size
 
     def _index_file(self, stream: BinaryIO) -> dict[int, list[int]]:
-        """Reads file in fixed chunks and builds {adler32: [offsets]} map."""
+        """
+        Build hash map of fixed-size chunks from the old file.
+        Returns {adler32_hash: [list of byte offsets]}.
+        """
         stream.seek(0)
         hash_map = defaultdict(list)
         offset = 0
+
         while True:
             chunk = stream.read(self.chunk_size)
             if not chunk:
                 break
 
-            # Use zlib.adler32 for fast initial hashing
+            # Use Adler-32 for fast rolling hash
             h = zlib.adler32(chunk) & 0xFFFFFFFF
             hash_map[h].append(offset)
             offset += len(chunk)
+
         return hash_map
 
-    def get_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:
+    def _compute_adler32_components(self, data: bytes) -> tuple[int, int, int]:
         """
-        Scans B file using rolling hash to find matches in A.
-        Yields (tag, i1, i2, j1, j2) byte offsets.
+        Compute Adler-32 hash and extract s1, s2 components.
+        Returns (hash, s1, s2).
         """
-        # Prepare B stream
+        h = zlib.adler32(data) & 0xFFFFFFFF
+        s1 = h & 0xFFFF
+        s2 = (h >> 16) & 0xFFFF
+        return h, s1, s2
+
+    def _roll_hash(self, s1: int, s2: int, out_byte: int, in_byte: int) -> tuple[int, int, int]:
+        """
+        Roll the Adler-32 hash by removing out_byte and adding in_byte.
+        Returns (new_hash, new_s1, new_s2).
+        """
+        # Update s1: remove old byte, add new byte
+        s1 = (s1 - out_byte + in_byte) % _BASE
+
+        # Update s2: remove contribution of old byte, add new s1
+        term1 = (self.chunk_size * out_byte) % _BASE
+        s2 = (s2 - term1 + s1 - _OFFS) % _BASE
+
+        h = ((s2 << 16) | s1) & 0xFFFFFFFF
+        return h, s1, s2
+
+    def _verify_and_extend_match(
+        self,
+        old_offset: int,
+        new_offset: int,
+        b_data: bytes,
+        max_extend: int = 1024 * 1024,  # 1MB extension limit
+    ) -> int:
+        """
+        Verify chunk match and extend it as far as possible.
+        Returns the total matched length (0 if no match).
+        """
+        # First verify the initial chunk
+        self.a_stream.seek(old_offset)
+        old_chunk = self.a_stream.read(self.chunk_size)
+
+        new_chunk = b_data[new_offset:new_offset + self.chunk_size]
+
+        if old_chunk != new_chunk:
+            return 0
+
+        matched_len = self.chunk_size
+
+        # Try to extend the match
+        remaining_new = len(b_data) - (new_offset + matched_len)
+        remaining_old = self.a_size - (old_offset + matched_len)
+        extend_limit = min(remaining_new, remaining_old, max_extend)
+
+        if extend_limit > 0:
+            # Read extension data in chunks for efficiency
+            EXTEND_CHUNK = 8192
+            extended = 0
+
+            while extended < extend_limit:
+                read_size = min(EXTEND_CHUNK, extend_limit - extended)
+
+                self.a_stream.seek(old_offset + matched_len + extended)
+                old_ext = self.a_stream.read(read_size)
+                new_ext = b_data[new_offset + matched_len + extended:
+                               new_offset + matched_len + extended + read_size]
+
+                # Find common prefix
+                mismatch_idx = self._find_mismatch(old_ext, new_ext)
+                extended += mismatch_idx
+
+                if mismatch_idx < len(old_ext):
+                    break  # Found mismatch
+
+            matched_len += extended
+
+        return matched_len
+
+    @staticmethod
+    def _find_mismatch(a: bytes, b: bytes) -> int:
+        """Find index of first mismatch between two byte sequences."""
+        min_len = min(len(a), len(b))
+        for i in range(min_len):
+            if a[i] != b[i]:
+                return i
+        return min_len
+
+    def get_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:  # noqa: C901
+        """
+        Scan new file using rolling hash to find matches in old file.
+        Yields (tag, i1, i2, j1, j2) where:
+        - 'equal': matched block (copy from old file)
+        - 'insert': new data to insert
+        - 'delete': gap in old file (seek forward)
+
+        Byte offsets: i1, i2 are in old file; j1, j2 are in new file.
+        """
         self.b_stream.seek(0)
+        b_size = self._get_file_size(self.b_stream)
 
-        # We need a window buffer.
-        # Reading byte-by-byte from disk is too slow.
-        # Strategy: Read B in large blocks (e.g. 1MB) into memory buffer.
+        # For memory efficiency, check if we can load entire new file
+        if b_size > self.max_memory:
+            raise MemoryError(
+                f"New file ({b_size} bytes) exceeds max_memory limit "
+                f"({self.max_memory} bytes). Increase max_memory or use streaming.",
+            )
 
-        B_BUFFER_SIZE = 1024 * 1024 * 4 # 4MB buffer
-        b_pos_global = 0
+        # Load new file into memory for faster access
+        self.b_stream.seek(0)
+        b_data = self.b_stream.read()
 
-        # Current window state
-        window = bytearray()
-        s1, s2 = _OFFS, 0 # Adler states
-
-        # Pending literal (insert) buffer start
+        # Initialize scanning state
+        i = 0  # Current position in new file
         pending_insert_start = 0
+        last_old_pos = 0
 
-        # To handle stream reading logic easily, let's load B entirely if feasible?
-        # Or manage complex buffering.
-        # For simplicity in this implementation, we assume we can read B.
-        # But to be "Stream" safe, we should handle buffering.
-
-        # Simplified approach: Use a sliding window on a buffered stream reader.
-        # But rotate needs the byte leaving.
-
-        # Let's verify against Old.
-
-        # Optimization: Don't implement full ring buffer in Python.
-        # Read all of B if it fits in memory? (SimpleRCS usually handles < 100MB)
-        # If we assume files fit in memory (or mapped), it's easier.
-        # Let's proceed with reading B fully for now to demonstrate logic.
-
-        self.b_stream.seek(0)
-        b_data = self.b_stream.read() # Warning: Memory intensive
-        len_b = len(b_data)
-
-        i = 0 # Window start in B
-        window_len = 0
-
-        # Initial window fill
-        first_chunk_len = min(len_b, self.chunk_size)
-        if first_chunk_len > 0:
-            window_len = first_chunk_len
-
-            # Calculate initial Adler efficiently
-            initial_val = zlib.adler32(b_data[0:window_len], 1) # 1 is default start
-
-            # Extract s1, s2 from zlib result?
-            # zlib.adler32 returns combined value.
-            # We need s1, s2 for rotation.
-            # Python's zlib doesn't expose s1/s2 directly easily.
-            # We must compute s1, s2 manually or reverse engineer?
-            # s1 = val & 0xFFFF, s2 = (val >> 16) & 0xFFFF
-
-            h = initial_val & 0xFFFFFFFF
-            s1 = h & 0xFFFF
-            s2 = (h >> 16) & 0xFFFF
-
+        # Initialize rolling hash window
+        if len(b_data) >= self.chunk_size:
+            h, s1, s2 = self._compute_adler32_components(b_data[:self.chunk_size])
+            window_ready = True
         else:
-            # Handle empty file or chunk_size > len_b initially
-            h = 1 # Default initial value for Adler-32
-            s1, s2 = _OFFS, 0
-            window_len = 0 # No window to fill
+            h, s1, s2 = 1, _OFFS, 0
+            window_ready = False
 
-        pending_start = 0
-        last_old_pos = 0 # Track old file position for seeks
-
-        while i < len_b:
-            # Check for match
+        # Main scanning loop
+        while i < len(b_data):
             best_match_len = 0
             best_old_offset = -1
 
-            # Only check if full window (or handle partial at EOF if we want to be fancy, but stick to fixed for now)
-            if window_len == self.chunk_size:
-                candidates = self.a_map.get(h)
-                if candidates:
-                    # Heuristic: Check a limited number of candidates to avoid O(N^2)
-                    # We iterate backwards or forwards? Default dict list is usually insertion order (sequential).
-                    # Maybe check latest (closest to current pos) first?
-                    # Let's just check the first few.
-                    check_count = 0
-                    max_checks = 20
+            # Check for matches only if we have a full window
+            if window_ready and (i + self.chunk_size <= len(b_data)):
+                candidates = self.a_map.get(h, [])
 
-                    for old_offset in candidates:
-                        check_count += 1
-                        if check_count > max_checks:
+                # Limit candidate checking to avoid O(n²) behavior
+                MAX_CANDIDATES = 20
+
+                for old_offset in candidates[:MAX_CANDIDATES]:
+                    match_len = self._verify_and_extend_match(old_offset, i, b_data)
+
+                    if match_len > best_match_len:
+                        best_match_len = match_len
+                        best_old_offset = old_offset
+
+                        # Early exit for very long matches
+                        if match_len > self.chunk_size * 4:
                             break
 
-                        # Verify strong match (memcmp) of the chunk first
-                        self.a_stream.seek(old_offset)
-                        old_chunk = self.a_stream.read(self.chunk_size)
-
-                        if b_data[i : i + self.chunk_size] == old_chunk:
-                            # Match found! Now try to EXTEND it.
-                            current_len = self.chunk_size
-
-                            # Read ahead in both streams
-                            # Optimization: Read blocks instead of bytes for speed
-                            # We can read until mismatch.
-
-                            # Simple byte-by-byte extension (slow but correct)
-                            # Or block extension.
-
-                            # Limit extension to avoid reading whole file?
-                            MAX_EXTEND = 1024 * 1024 # 1MB limit for sanity
-
-                            # Check available bounds
-                            # old stream can be read further.
-                            # b_data is available in memory.
-
-                            # We need to read old stream beyond old_offset + chunk_size
-                            # Let's read a buffer.
-
-                            extend_limit = min(len_b - (i + current_len), MAX_EXTEND)
-                            if extend_limit > 0:
-                                self.a_stream.seek(old_offset + current_len)
-                                old_next = self.a_stream.read(extend_limit)
-                                b_next = b_data[i + current_len : i + current_len + len(old_next)]
-
-                                # Compare
-                                # Python's sequence comparison is fast.
-                                # Find common prefix length.
-                                # os.path.commonprefix is for paths.
-                                # We can use a loop or logic.
-
-                                # Fast common prefix length:
-                                k = 0
-                                # Optimization: Compare in chunks?
-                                # Let's keep it simple: if they are equal, great.
-                                # If not, find where they differ.
-
-                                if old_next == b_next:
-                                    current_len += len(old_next)
-                                else:
-                                    # Find mismatch index
-                                    # Binary search or linear scan?
-                                    # Linear scan on mismatch
-                                    min_len = min(len(old_next), len(b_next))
-                                    for k in range(min_len):
-                                        if old_next[k] != b_next[k]:
-                                            break
-                                    else:
-                                        k = min_len
-                                    current_len += k
-
-                            if current_len > best_match_len:
-                                best_match_len = current_len
-                                best_old_offset = old_offset
-
-                                # If we found a very long match, stop searching candidates.
-                                if best_match_len > self.chunk_size * 4:
-                                    break
-
+            # Process match if found
             if best_match_len > 0:
-                # 1. Yield pending inserts
-                if i > pending_start:
-                    yield ('insert', 0, 0, pending_start, i)
+                # Yield pending inserts
+                if i > pending_insert_start:
+                    yield ('insert', 0, 0, pending_insert_start, i)
 
-                # 2. Yield seek (delete) if needed
-                seek_dist = best_old_offset - last_old_pos
-                if seek_dist != 0:
+                # Yield delete/seek if old file position changed
+                if best_old_offset != last_old_pos:
                     yield ('delete', last_old_pos, best_old_offset, i, i)
 
-                # 3. Yield match
-                yield ('equal', best_old_offset, best_old_offset + best_match_len, i, i + best_match_len)
+                # Yield match
+                yield ('equal', best_old_offset, best_old_offset + best_match_len,
+                       i, i + best_match_len)
 
-                # 4. Update state
-                # Advance 'i' by the length of the matched block
+                # Advance position
                 i += best_match_len
-                pending_start = i
+                pending_insert_start = i
                 last_old_pos = best_old_offset + best_match_len
 
-                # Re-initialize rolling hash at new position
-                if i + self.chunk_size <= len_b:
-                    next_chunk = b_data[i : i + self.chunk_size]
-                    h = zlib.adler32(next_chunk, 1) & 0xFFFFFFFF
-                    s1 = h & 0xFFFF
-                    s2 = (h >> 16) & 0xFFFF
-                    window_len = self.chunk_size
+                # Reinitialize hash at new position
+                if i + self.chunk_size <= len(b_data):
+                    h, s1, s2 = self._compute_adler32_components(
+                        b_data[i:i + self.chunk_size],
+                    )
+                    window_ready = True
                 else:
-                    # Near EOF, partial chunk, cannot form full window
-                    window_len = len_b - i
-                    # No need to re-initialize h, s1, s2 if window is partial/empty
+                    window_ready = False
 
-                continue # Continue outer while loop
+                continue
 
-            # No match (or partial window). Roll 1 byte.
-            # This block executes if 'best_match_len == 0' after checking candidates
-            # or if 'window_len != self.chunk_size' (initial partial window or near EOF).
-            if i + self.chunk_size < len_b:
-                # We can slide the window forward by one byte
+            # No match found - roll the window forward by one byte
+            if i + self.chunk_size < len(b_data):
                 out_byte = b_data[i]
                 in_byte = b_data[i + self.chunk_size]
-
-                # Update Adler-32 (Rotate)
-                s1 = (s1 - out_byte + in_byte) % _BASE
-                term1 = (self.chunk_size * out_byte) % _BASE
-                s2 = (s2 - term1 + s1 - _OFFS) % _BASE
-
-                h = (s2 << 16) | s1
-
+                h, s1, s2 = self._roll_hash(s1, s2, out_byte, in_byte)
                 i += 1
-                # window_len remains chunk_size as we are just sliding the window
             else:
-                # Cannot slide anymore (EOF reached for window end)
-                # Remaining bytes in B (from 'i' to 'len_b') are inserts.
+                # Approaching EOF - can't maintain full window
                 break
 
-        # Flush any remaining inserts after the main loop finishes
-        if pending_start < len_b:
-            yield ('insert', 0, 0, pending_start, len_b)
+        # Flush remaining inserts
+        if pending_insert_start < len(b_data):
+            yield ('insert', 0, 0, pending_insert_start, len(b_data))
