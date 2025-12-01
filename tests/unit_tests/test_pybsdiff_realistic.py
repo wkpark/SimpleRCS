@@ -129,6 +129,7 @@ def test_realistic_data_patch_size(tmp_path):
 
     # Verify correctness
     assert patch(old_data, patch_64) == new_data
+    _analyze_patch_structure(patch_64, "pybsdiff (Chunk=4096)")
 
     # 4. pybsdiff (Chunk=4096) - Optimized for large files
     # Larger chunks mean fewer control tuples => smaller patch size for large matches
@@ -145,5 +146,19 @@ def test_realistic_data_patch_size(tmp_path):
 
     _analyze_patch_structure(patch_4k, "pybsdiff (Chunk=4096)")
 
+    # 5. pybsdiff (Rolling Hash) - Optimized for shift/insert/delete
+    print(f"\n[pybsdiff Rolling Hash chunk=4096]")
+    start = time.perf_counter()
+    patch_rolling = diff(old_data, new_data, chunk_size=4096, matcher_type='rolling')
+    time_rolling = time.perf_counter() - start
+    size_rolling = len(patch_rolling)
+
+    print(f"Time: {time_rolling:.4f}s")
+    print(f"Size: {size_rolling} bytes")
+    print(f"Size Ratio (vs Native): {size_rolling/native_size:.2f}x")
+    print(f"Time Ratio (vs Native): {time_rolling/native_time:.2f}x")
+
+    _analyze_patch_structure(patch_rolling, "pybsdiff (Rolling Hash)")
+
     # Verify correctness
-    assert patch(old_data, patch_4k) == new_data
+    assert patch(old_data, patch_rolling) == new_data
