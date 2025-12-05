@@ -368,9 +368,7 @@ def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
             if 0 <= old_pos and old_pos + diff_read_len <= len(old):
                 # Fast path
                 old_slice = old[old_pos : old_pos + diff_read_len]
-                chunk = bytearray(diff_read_len)
-                for i in range(diff_read_len):
-                    chunk[i] = (old_slice[i] + diff_segment[i]) & 0xFF
+                chunk = bytearray((ov + dv) & 0xFF for ov, dv in zip(old_slice, diff_segment))
                 new_data[new_pos : new_pos + diff_read_len] = chunk
             else:
                 # Slow path (bounds checking)
