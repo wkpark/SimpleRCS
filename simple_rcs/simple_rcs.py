@@ -1,3 +1,4 @@
+import base64
 import difflib
 import hashlib
 import io
@@ -8,6 +9,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import BinaryIO
 
+from src.app.common import pybsdiff
 from src.app.common.pydifflib import StreamSequenceMatcher
 
 
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 class SimpleRCS:
     """
     A simple, robust, and efficient version control system inspired by RCS.
+    Supports both Text (RCS diff) and Binary (BSDIFF) files.
     It operates on a file-like object (stream), supporting both on-disk files and in-memory buffers.
 
     Architecture & Key Features:
@@ -177,6 +180,34 @@ class SimpleRCS:
             return 2
         return 1
 
+    def _encode_binary(self, data: bytes, encoding: str = 'base64') -> bytes:
+        """Encodes binary data to bytes format: <length>;<encoding>,<encoded>"""
+        if encoding == 'base85':
+            encoded = base64.b85encode(data)
+            return f"{len(encoded)};base85,".encode('ascii') + encoded
+        elif encoding == 'raw':
+            # Raw binary: Length-Based Parsing allows unescaped storage.
+            return f"{len(data)};raw,".encode('ascii') + data
+        else:
+            # Default to base64
+            encoded = base64.b64encode(data)
+            return f"{len(encoded)};base64,".encode('ascii') + encoded
+
+    def _decode_binary(self, text: bytes) -> bytes:
+        """Decodes binary data from bytes format."""
+        # text is bytes here, e.g. b"1024;base64,..."
+        if b";base64," in text:
+            _, encoded = text.split(b";base64,", 1)
+            return base64.b64decode(encoded)
+        elif b";base85," in text:
+            _, encoded = text.split(b";base85,", 1)
+            return base64.b85decode(encoded)
+        elif b";raw," in text:
+            _, raw_data = text.split(b";raw,", 1)
+            return raw_data
+        else:
+            raise ValueError("Invalid binary format")
+
     def _calculate_block_hash(self, data: dict, prev_hash: str | None = None) -> str:
         """
         Calculates hash of the block content using self._hash_algo.
@@ -191,18 +222,29 @@ class SimpleRCS:
         date = str(data.get("date", ""))
         author = str(data.get("author", ""))
         log = str(data.get("log", ""))
-        text = str(data.get("text", "")) # This MUST be Full Text
 
-        # Enforce EOL policy
-        if text and not text.endswith('\n'):
-            text += '\n'
+        content = data.get("text") # Can be str or bytes
+        if isinstance(content, bytes):
+            text_bytes = content
+        else:
+            text_str = str(content) if content is not None else ""
+            # Enforce EOL policy for text
+            if text_str and not text_str.endswith('\n'):
+                text_str += '\n'
+            text_bytes = text_str.encode(self.encoding)
 
         p_hash = prev_hash if prev_hash else ""
 
-        payload = f"{ver}|{date}|{author}|{log}|{text}|{p_hash}"
+        # Construct payload components
+        # ver|date|author|log|
+        meta = f"{ver}|{date}|{author}|{log}|".encode(self.encoding)
+        # |prev_hash
+        tail = f"|{p_hash}".encode(self.encoding)
 
         hasher = hashlib.new(self._hash_algo)
-        hasher.update(payload.encode(self.encoding))
+        hasher.update(meta)
+        hasher.update(text_bytes)
+        hasher.update(tail)
         return hasher.hexdigest()
 
 
@@ -230,7 +272,7 @@ class SimpleRCS:
         """Unescapes '@@' back to '@'."""
         return text.replace("@@", "@")
 
-    def _parse_block_content(self, content_bytes: bytes) -> dict:
+    def _parse_block_content(self, content_bytes: bytes) -> dict:  # noqa: C901
         """
         Parses a raw block bytes into a dictionary.
         Format: key @value@; ...
@@ -239,7 +281,7 @@ class SimpleRCS:
         data = {}
         # Regex matches keys (ver, date, etc.) and values enclosed in @...@
         # Use re.DOTALL to match newlines within @...@
-        pattern = re.compile(r'(ver|version|date|author|log|text|delta)\s+@((?:[^@]|@@)*)@;', re.DOTALL)
+        pattern = re.compile(r'(ver|version|date|author|log|text|delta|binary)\s+@((?:[^@]|@@)*)@;', re.DOTALL)
 
         # Iterate over all matches to build the data dictionary
         for match in pattern.finditer(content_str):
@@ -251,9 +293,18 @@ class SimpleRCS:
             if key == 'delta':
                 data['text'] = value
                 data['is_delta'] = True
+                data['is_binary'] = ";base64," in value or ";base85," in value
             elif key == 'text':
                 data['text'] = value
                 data['is_delta'] = False
+            elif key == 'binary':
+                # For regex parser, we decode eagerly since content_str is already str
+                # But _decode_binary expects bytes.
+                # We should re-encode value to bytes or make _decode_binary flexible?
+                # _decode_binary expects bytes. value is str.
+                data['text'] = self._decode_binary(value.encode('ascii'))
+                data['is_delta'] = False
+                data['is_binary'] = True
             elif key == 'signature':
                 if 'signatures' not in data:
                     data['signatures'] = []
@@ -264,7 +315,9 @@ class SimpleRCS:
         # Basic validation to ensure it looks like a valid block
         if 'ver' in data:
             if 'is_delta' not in data:
-                data['is_delta'] = False # Default assumption for old parser
+                data['is_delta'] = False
+            if 'is_binary' not in data:
+                data['is_binary'] = False
             return data
         return {}
 
@@ -279,7 +332,7 @@ class SimpleRCS:
         # Added v2 keywords: prev_hash, hash, signature
         # Added 'delta' for mixed snapshot support
         _keywords = [b'ver', b'version', b'date',
-            b'author', b'log', b'text', b'delta', b'prev_hash', b'hash', b'signature']
+            b'author', b'log', b'text', b'delta', b'binary', b'prev_hash', b'hash', b'signature']
 
         content = content_bytes
         length = len(content)
@@ -314,27 +367,79 @@ class SimpleRCS:
 
             pos += 1 # Skip opening '@'
 
-            # Read Value, handling '@@' escaping
+            # Length-Based Parsing Check
+            # Check if value starts with "<digits>;"
+            # Only allow for 'binary' or 'delta' keys to prevent collisions in 'text' fields
+            allow_length_based = (key_bytes == b'binary') or (key_bytes == b'delta')
+
+            is_length_based = False
+            data_len = 0
+            header_end_idx = -1 # Relative to pos
+
+            if allow_length_based:
+                # We peek a small chunk to check for the header.
+                peek_len = min(length - pos, 50)
+                peek_chunk = content[pos : pos + peek_len]
+
+                # Find ';'
+                semi_idx = peek_chunk.find(b';')
+                if semi_idx != -1:
+                    len_str_bytes = peek_chunk[:semi_idx]
+                    if len_str_bytes.isdigit():
+                        try:
+                            data_len = int(len_str_bytes)
+                            # Found length. Now find end of header (',')
+                            comma_idx = peek_chunk.find(b',', semi_idx)
+                            if comma_idx != -1:
+                                header_end_idx = comma_idx + 1 # Include comma
+                                is_length_based = True
+                        except ValueError:
+                            pass
+
             val_parts = []
-            while pos < length:
-                # Fast search for next '@'
-                end = content.find(b'@', pos)
-                if end == -1:
-                    # Unterminated string, malformed block
+            if is_length_based:
+                # Read Header
+                header_bytes = content[pos : pos + header_end_idx]
+                val_parts.append(header_bytes)
+                pos += header_end_idx
+
+                # Read Data (exactly data_len bytes)
+                if pos + data_len > length:
+                    # Truncated
                     break
 
-                # Check for double '@@' (escaped '@')
-                if end + 1 < length and content[end+1] == ord('@'):
-                    val_parts.append(content[pos:end])
-                    val_parts.append(b'@') # Unescape @@ -> @
-                    pos = end + 2
-                else:
-                    val_parts.append(content[pos:end])
-                    pos = end + 1 # Skip closing '@'
-                    break
+                data_bytes = content[pos : pos + data_len]
+                val_parts.append(data_bytes)
+                pos += data_len
 
-            value_bytes = b"".join(val_parts)
-            value = value_bytes.decode(self.encoding, errors='replace')
+                # Verify closing '@'
+                if pos < length and content[pos] == ord('@'):
+                    pos += 1 # Skip closing '@'
+                # Closing ';' handled by main loop
+                # Final assembling of value_bytes
+                value_bytes = b"".join(val_parts)
+            else:
+                # Delimiter-Based Read (Legacy/Text/Base64)
+                # Read Value, handling '@@' escaping
+                while pos < length:
+                    # Fast search for next '@'
+                    end = content.find(b'@', pos)
+                    if end == -1:
+                        # Unterminated string, malformed block
+                        break
+
+                    # Check for double '@@' (escaped '@')
+                    if end + 1 < length and content[end+1] == ord('@'):
+                        val_parts.append(content[pos:end])
+                        val_parts.append(b'@') # Unescape @@ -> @
+                        pos = end + 2
+                    else:
+                        val_parts.append(content[pos:end])
+                        pos = end + 1 # Skip closing '@'
+                        break
+
+                # Final assembling of value_bytes
+                value_bytes = b"".join(val_parts)
 
             # Skip whitespace after value
             while pos < length and content[pos] in b' \t\r\n':
@@ -347,29 +452,54 @@ class SimpleRCS:
                 # Malformed, missing ';'
                 break
 
-            # Store data
+            # Store data based on key and parsing strategy
             key_str = key_bytes.decode(self.encoding)
             if key_str == 'version':
                 key_str = 'ver' # Normalize key
 
-            if key_str == 'delta':
-                data['text'] = value
-                data['is_delta'] = True
-            elif key_str == 'text':
-                data['text'] = value
+            if key_str == 'binary':
+                # Binary data is always length-prefixed and decoded.
+                data['text'] = self._decode_binary(value_bytes)
                 data['is_delta'] = False
+                data['is_binary'] = True
+            elif key_str == 'delta':
+                # Delta can be RCS text delta or binary delta (base64/base85/raw).
+                # If length-based parsing was used, value_bytes is the full header + data payload.
+                # _decode_binary will handle header stripping and decoding.
+
+                if is_length_based:
+                    # For length-based delta, value_bytes is the full header + data payload (bytes).
+                    # Store it directly. _apply_reverse_delta will handle splitting/decoding.
+                    data['text'] = value_bytes
+                    data['is_delta'] = True
+                    data['is_binary'] = True # Always binary if length-based delta
+                else:
+                    value_str = value_bytes.decode(self.encoding, errors='replace')
+                    data['text'] = value_str
+                    data['is_delta'] = True
+                    # Check for legacy base64/base85 signatures in text string
+                    data['is_binary'] = ";base64," in value_str or ";base85," in value_str
+            elif key_str == 'text':
+                # Text content is always delimiter-based and decoded to string.
+                value_str = value_bytes.decode(self.encoding, errors='replace')
+                data['text'] = value_str
+                data['is_delta'] = False
+                data['is_binary'] = False
             elif key_str == 'signature':
-                # Handle multiple signatures
+                value_str = value_bytes.decode(self.encoding, errors='replace')
                 if 'signatures' not in data:
                     data['signatures'] = []
-                data['signatures'].append(value)
+                data['signatures'].append(value_str)
             else:
-                data[key_str] = value
+                value_str = value_bytes.decode(self.encoding, errors='replace')
+                data[key_str] = value_str
 
         # Basic validation to ensure it looks like a valid block
         if 'ver' in data:
             if 'is_delta' not in data:
-                data['is_delta'] = False # Default if not specified (backward compat)
+                data['is_delta'] = False
+            if 'is_binary' not in data:
+                data['is_binary'] = False
             return data
         return {}
 
@@ -471,19 +601,28 @@ class SimpleRCS:
 
         return None
 
-    def _generate_reverse_delta(self, new_text: str, old_text: str) -> str:
+    def _generate_reverse_delta(self, new_data: str | bytes, old_data: str | bytes, encoding: str = 'base64') -> str:
         """
-        Generates an RCS-style ('diff -n') Reverse Delta.
-        Goal: Create instructions to transform 'new_text' (Source) INTO 'old_text' (Dest).
-
-        Why New->Old?
-        Because we store HEAD as Full Text. To get the previous version, we need
-        to apply a patch to HEAD that turns it back into the previous version.
+        Generates Reverse Delta.
+        If inputs are bytes, generates BSDIFF delta (base64 encoded).
+        If inputs are strings, generates an RCS-style ('diff -n') Reverse Delta.
         """
-        new_stream = io.BytesIO(new_text.encode(self.encoding))
-        old_stream = io.BytesIO(old_text.encode(self.encoding))
+        if isinstance(new_data, bytes) and isinstance(old_data, bytes):
+            # Binary Diff (BSDIFF)
+            patch_data = pybsdiff.diff(new_data, old_data) # New -> Old
+            # Encode to base64 bytes, then decode to str for storage in delta block
+            encoded_bytes = self._encode_binary(patch_data, encoding=encoding)
+            return encoded_bytes.decode('ascii')
+        elif isinstance(new_data, str) and isinstance(old_data, str):
+            pass
+        else:
+            raise TypeError("Cannot generate delta between mixed types (str/bytes)")
 
-        matcher = StreamSequenceMatcher(new_stream, old_stream, encoding=self.encoding, chunk_size=None)
+        # Text Diff (RCS)
+        new_stream = io.BytesIO(new_data.encode(self.encoding))
+        old_stream = io.BytesIO(old_data.encode(self.encoding))
+
+        matcher = StreamSequenceMatcher(new_stream, old_stream, chunk_size=None)
         output = []
 
         # opcodes: describes how to turn 'a' (New) into 'b' (Old)
@@ -533,19 +672,46 @@ class SimpleRCS:
 
         return "\n".join(output)
 
-    def _apply_reverse_delta(self, current_text: str, delta_text: str) -> str:  # noqa: C901
+    def _apply_reverse_delta(self, current_data: str | bytes, delta_text: str | bytes) -> str | bytes:  # noqa: C901
         """
-        Applies an RCS 'diff -n' script to 'current_text'.
-        This transforms the current version (e.g., 1.2) back to the previous version (1.1).
+        Applies a reverse delta.
+        Detects binary delta by signature.
+        """
+        # Ensure delta_text is bytes for signature check if it's not already
+        # Wait, if delta_text is str, `b"..." in delta_text` will fail.
+        # We should normalize check or handle both.
 
-        Strategy:
-        1. Parse diff commands.
-        2. Sort commands by line number in descending order (Bottom-Up).
-        3. Apply commands to the 'lines' list.
-        Sorting by descending line number ensures that insertions/deletions do not
-        invalidate the indices of subsequent operations (which are higher up in the file).
-        """
-        lines = current_text.splitlines(keepends=True)
+        is_binary_delta = False
+        if isinstance(delta_text, bytes):
+            if b";base64," in delta_text or b";base85," in delta_text or b";raw," in delta_text:
+                is_binary_delta = True
+        elif isinstance(delta_text, str):
+            if ";base64," in delta_text or ";base85," in delta_text: # raw is always bytes
+                is_binary_delta = True
+
+        if is_binary_delta:
+            if isinstance(current_data, str):
+                 current_data = current_data.encode(self.encoding)
+
+            # Prepare delta for decoding
+            if isinstance(delta_text, str):
+                delta_bytes = delta_text.encode('ascii')
+            else:
+                delta_bytes = delta_text
+
+            patch_data = self._decode_binary(delta_bytes)
+            return pybsdiff.patch(current_data, patch_data)
+
+        # Text Delta (RCS)
+        if isinstance(current_data, bytes):
+             # Should be string for RCS patch
+             current_data = current_data.decode(self.encoding)
+
+        # Ensure delta_text is str for RCS processing
+        if isinstance(delta_text, bytes):
+            delta_text = delta_text.decode(self.encoding)
+
+        lines = current_data.splitlines(keepends=True)
         commands = []
 
         script_lines = delta_text.splitlines()
@@ -602,6 +768,7 @@ class SimpleRCS:
         prev_hash: str | None = None,
         signatures: list[str] | None = None,
         is_delta: bool = False,
+        encoding: str = 'base64',
     ) -> bytes:
         """
         Formats a block dictionary into bytes for writing to the stream.
@@ -611,34 +778,43 @@ class SimpleRCS:
         lines = []
         for key in keys:
             val = self._escape(str(data.get(key, "")))
-            lines.append(f"{key} @{val}@;")
+            lines.append(f"{key} @{val}@;".encode(self.encoding))
 
-        # Determine content key: 'delta' for deltas, 'text' for snapshots/full-text
-        content_key = "delta" if is_delta else "text"
-        val = self._escape(str(data.get("text", "")))
-        lines.append(f"{content_key} @{val}@;")
+        content_val = data.get("text", "")
+
+        if isinstance(content_val, bytes):
+            # Binary Full Text
+            # _encode_binary returns bytes: b"len;base64,..."
+            val_bytes = self._encode_binary(content_val, encoding=encoding)
+            lines.append(b"binary @" + val_bytes + b"@;")
+        else:
+            # Text Full Text OR Encoded Delta
+            content_key = "delta" if is_delta else "text"
+            val = self._escape(str(content_val))
+            lines.append(f"{content_key} @{val}@;".encode(self.encoding))
 
         # Add v2 fields if present
         if self._version >= 2:
             if prev_hash:
-                lines.append(f"prev_hash @{self._escape(prev_hash)}@;")
+                lines.append(f"prev_hash @{self._escape(prev_hash)}@;".encode(self.encoding))
             if current_hash:
-                lines.append(f"hash @{self._escape(current_hash)}@;")
+                lines.append(f"hash @{self._escape(current_hash)}@;".encode(self.encoding))
 
             if signatures:
                 for sig in signatures:
-                    lines.append(f"signature @{self._escape(sig)}@;")
+                    lines.append(f"signature @{self._escape(sig)}@;".encode(self.encoding))
 
-        return ("\n".join(lines) + "\n\n").encode('utf-8')
+        return b"\n".join(lines) + b"\n\n"
 
     def commit(  # noqa: C901
         self,
-        content: str,
+        content: str | bytes,
         author: str = "unknown",
         log: str = "",
         signer_callbacks: list[Callable[[str], tuple[str, str]]] | None = None,
         date: str | None = None,
         snapshot: bool = False,
+        encoding: str = 'base64',
     ) -> str:
         """
         Commits new content as the latest version.
@@ -655,18 +831,23 @@ class SimpleRCS:
             snapshot: If True, the previous HEAD (Old Block) is saved as Full Text
                       instead of being converted to a delta. This creates an
                       intermediate snapshot for faster retrieval.
+            encoding: Encoding to use for binary data ('base64' or 'base85').
         """
         self._load_head() # Refresh HEAD info by scanning the stream
         now = date if date else datetime.now().isoformat()
 
-        # Enforce EOL policy for consistent hashing
-        if content and not content.endswith('\n'):
+        # Enforce EOL policy for consistent hashing (only for text)
+        if isinstance(content, str) and content and not content.endswith('\n'):
             content += '\n'
 
         # --- First Commit Case ---
         if not self.head_info:
             new_ver = "1.0"
             block_data = {"ver": new_ver, "date": now, "author": author, "log": log, "text": content}
+
+            # Set binary flag for first commit
+            if isinstance(content, bytes):
+                block_data['is_binary'] = True
 
             # v2 Logic: Hash & Sign
             curr_hash = None
@@ -687,7 +868,7 @@ class SimpleRCS:
 
             self.stream.seek(0, os.SEEK_END) # Append to end
             self.stream.write(self._format_block(
-                block_data, current_hash=curr_hash, signatures=signatures, is_delta=False))
+                block_data, current_hash=curr_hash, signatures=signatures, is_delta=False, encoding=encoding))
 
             if isinstance(self.stream, io.BytesIO):
                 return self.get_content()
@@ -695,23 +876,42 @@ class SimpleRCS:
 
         # --- Subsequent Commit Case ---
         head = self.head_info
-        head_content = head["text"]
+        # Use .get() to avoid KeyError if 'text' is missing (e.g. malformed block)
+        # Default to empty bytes if it was marked as binary, else empty string.
+        default_content = b"" if head.get("is_binary") else ""
+        head_content = head.get("text", default_content)
 
         # 1. Prepare Old Block (Vn)
         head_block_data = head.copy()
 
+        is_binary_content = isinstance(content, bytes)
+        is_binary_head = head.get('is_binary', False) # Default to False if missing
+
+        is_type_change = is_binary_content != is_binary_head
+
         # Decide whether to save as Delta or Full Text Snapshot
         is_delta_block = True
 
-        if snapshot:
+        if snapshot or is_type_change:
             # Snapshot mode: Keep Old Block as Full Text
             is_delta_block = False
             # text is already set to full text in head_block_data
+            # Ensure is_binary flag is correct for the old block
+            head_block_data['is_binary'] = is_binary_head
         else:
             # Standard mode: Compute Reverse Delta: New Content (Vn+1) -> Old Head Content (Vn)
-            delta = self._generate_reverse_delta(content, head_content)
+            # Ensure types match before calling delta generation
+            if is_binary_content:
+                # Both are binary (checked by is_type_change)
+                delta = self._generate_reverse_delta(content, head_content, encoding=encoding)
+            else:
+                # Both are text
+                delta = self._generate_reverse_delta(content, head_content)
+
             head_block_data["text"] = delta
             is_delta_block = True
+            # Delta block inherits the binary nature of the data it represents
+            head_block_data['is_binary'] = is_binary_head
 
         # Cleanup internal metadata
         if "start" in head_block_data:
@@ -738,6 +938,8 @@ class SimpleRCS:
             new_ver = "1.0" # Fallback if version is malformed
 
         new_block_data = {"ver": new_ver, "date": now, "author": author, "log": log, "text": content}
+        if is_binary_content:
+            new_block_data['is_binary'] = True
 
         new_curr_hash = None
         new_prev_hash = None
@@ -770,6 +972,7 @@ class SimpleRCS:
             prev_hash=old_prev_hash,
             signatures=old_signatures,
             is_delta=is_delta_block,
+            encoding=encoding,
         )
 
         # Append New Block (Full Text)
@@ -779,6 +982,7 @@ class SimpleRCS:
             prev_hash=new_prev_hash,
             signatures=new_signatures,
             is_delta=False, # HEAD is always Full Text
+            encoding=encoding,
         )
 
         self.stream.seek(self.head_info['start'])
@@ -790,7 +994,7 @@ class SimpleRCS:
             return self.get_content()
         return new_ver
 
-    def checkout(self, ver_num: str = None) -> str:
+    def checkout(self, ver_num: str = None) -> str | bytes:
         """
         Retrieves the content of a specific version.
 
@@ -801,13 +1005,21 @@ class SimpleRCS:
         4. Stop when the target version is reached.
         """
         self._load_head() # Ensure HEAD info is up-to-date
+
+        # Define default_content safely at the start of the method
+        default_content = b""
+        if self.head_info and self.head_info.get("is_binary"):
+            default_content = b""
+        else:
+            default_content = ""
+
         if not self.head_info:
-            return "" # Empty history
+            return default_content # Handle initial empty state
 
         if ver_num is None or ver_num == self.head_info["ver"]:
-            return self.head_info["text"]
+            return self.head_info.get("text", default_content)
 
-        curr_text = self.head_info["text"]
+        curr_content = self.head_info.get("text", default_content) # Initialize curr_content safely
         curr_block = self.head_info
 
         # Iterate backwards, applying deltas
@@ -821,17 +1033,17 @@ class SimpleRCS:
             # Check if prev_block is a Snapshot (Full Text) or Delta
             if not prev_block.get('is_delta', True): # Default to True (delta) if flag missing
                 # It's a snapshot! We can jump directly to this content.
-                curr_text = prev_block["text"]
+                curr_content = prev_block["text"]
             else:
                 # It's a delta. Apply it.
                 # prev_block contains the delta to transform curr_text to prev_text
                 # (Strictly speaking, V_prev contains delta to go from V_curr to V_prev)
                 delta = prev_block["text"]
-                curr_text = self._apply_reverse_delta(curr_text, delta)
+                curr_content = self._apply_reverse_delta(curr_content, delta)
 
             # Check if this is our target version
             if prev_block["ver"] == ver_num:
-                return curr_text
+                return curr_content
 
             curr_block = prev_block # Move to the previous block
 
@@ -866,6 +1078,7 @@ class SimpleRCS:
                 meta["hash"] = curr_block.get("hash")
                 meta["prev_hash"] = curr_block.get("prev_hash")
                 meta["signatures"] = curr_block.get("signatures", []) # List of signature strings
+                meta["is_binary"] = curr_block.get("is_binary", False)
 
             history.append(meta)
 
@@ -897,6 +1110,9 @@ class SimpleRCS:
 
         if content_a is None or content_b is None:
              raise ValueError("One or both versions could not be found.")
+
+        if isinstance(content_a, bytes) or isinstance(content_b, bytes):
+            return "Binary files differ"
 
         lines_a = content_a.splitlines(keepends=True)
         lines_b = content_b.splitlines(keepends=True)
@@ -933,6 +1149,9 @@ class SimpleRCS:
             return []
 
         head_text = self.head_info['text']
+        if isinstance(head_text, bytes):
+            return []
+
         head_lines = head_text.splitlines(keepends=True)
 
         # 1. Initialize tracker
@@ -998,6 +1217,15 @@ class SimpleRCS:
 
             # Parse Delta (Current -> Prev)
             delta = prev_block['text']
+
+            # Stop blame if we hit binary data or binary delta
+            if prev_block.get('is_binary', False) or (prev_block.get('is_delta', False) and ";base64," in str(delta)):
+                 for item in tracker:
+                    if item['head_index'] is not None:
+                        if final_blame[item['head_index']] is None:
+                            final_blame[item['head_index']] = prev_commit
+                 break
+
             script_lines = delta.splitlines()
 
             commands = []
@@ -1266,6 +1494,10 @@ class SimpleRCS:
             # We use the 'curr_text' which is the Full Text of this version.
             block_data_for_hash = curr_block.copy()
             block_data_for_hash['text'] = curr_text
+            # Ensure is_binary flag matches what was committed
+            # Ideally, curr_block has it. If not (old ver), default false.
+            # But wait, curr_block is the metadata block. We should use its flag.
+            # 'curr_text' is the Reconstructed Full Text. Its type should match.
 
             calculated_hash = self._calculate_block_hash(block_data_for_hash, prev_hash=stored_prev_hash)
 
@@ -1273,6 +1505,8 @@ class SimpleRCS:
                 logger.error(f"calc hash = {calculated_hash} ,stored hash = {stored_hash}")
                 logger.error(f"Hash mismatch at version {curr_block.get('ver')}")
                 return False
+            else:
+                logger.info(f"Verify Pass: Ver {curr_block.get('ver')} Hash {stored_hash}")
 
             # 2. Verify Signatures (if callbacks provided)
             signatures = curr_block.get('signatures', [])
