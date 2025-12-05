@@ -70,8 +70,8 @@ def get_gpg_uid(key_id: str) -> tuple[str, str]:  # noqa: C901
                                 trust_level = "marginal"
 
         return uid_string, trust_level
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.warning(f"GPG key lookup for '{key_id}' failed: {e}")
 
     return key_id, "unknown"
 
