@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from src.app.common.pybsdiff import diff, patch
+from src.app.common.pybsdiff import diff, patch, _read_off_t
 
 
 BSDIFF_CMD = shutil.which("bsdiff")
@@ -75,7 +75,10 @@ class TestBsdiffCompatSmall:
         while True:
             chunk = ctrl_buf.read(24)
             if not chunk: break
-            d, e, s = struct.unpack('<QQq', chunk)
+
+            d = _read_off_t(chunk[0:8])
+            e = _read_off_t(chunk[8:16])
+            s = _read_off_t(chunk[16:24])
             print(f"  Ctrl[{idx}]: Diff={d}, Extra={e}, Seek={s}")
             idx += 1
 
