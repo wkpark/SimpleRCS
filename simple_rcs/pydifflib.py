@@ -389,10 +389,10 @@ class StreamSequenceMatcher:
                    a_global_offset + len_a, a_global_offset + len_a,
                    b_global_offset + b_idx, b_global_offset + len_b)
 
-    def _get_byte_offset(self, offsets: int, idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:
+    def _get_byte_offset(self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:
         if idx < len(offsets):
             return offsets[idx]
-        if stream and is_end and offsets:
+        if stream and (is_end or idx >= len(offsets)):
             stream.seek(0, os.SEEK_END)
             return stream.tell()
         return 0 # Should handle empty/start cases
