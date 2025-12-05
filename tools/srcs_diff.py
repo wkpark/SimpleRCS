@@ -11,6 +11,7 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from src.app.common.myersdiff import MyersSequenceMatcher
 from src.app.common.pydifflib import StreamSequenceMatcher
 from src.app.common.simple_rcs import SimpleRCS
 
@@ -29,17 +30,11 @@ def resolve_rcs_path(target_path: Path, explicit_rcs_path: str = None, srcs_dir_
     srcs_dir = Path(srcs_dir_name)
     return srcs_dir / rcs_filename
 
-def print_pydifflib_unified_diff(content_a: str, content_b: str, fromfile: str, tofile: str, context: int = 3):
+def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str], fromfile: str, tofile: str, context: int = 3):
     """
-    Generates and prints a unified diff using pydifflib.StreamSequenceMatcher with proper context.
+    Generates and prints a unified diff using a given matcher with proper context.
+    Works with any matcher providing get_opcodes().
     """
-    stream_a = io.BytesIO(content_a.encode('utf-8'))
-    stream_b = io.BytesIO(content_b.encode('utf-8'))
-
-    matcher = StreamSequenceMatcher(stream_a, stream_b, chunk_size=None)
-    lines_a = content_a.splitlines(keepends=True)
-    lines_b = content_b.splitlines(keepends=True)
-
     fromdate = time.ctime(os.stat(fromfile).st_mtime) if os.path.exists(fromfile) else time.ctime()
     todate = time.ctime()
 
@@ -47,6 +42,10 @@ def print_pydifflib_unified_diff(content_a: str, content_b: str, fromfile: str, 
     print(f"+++ {tofile}\t{todate}")
 
     opcodes = list(matcher.get_opcodes())
+
+    # Check if there are any changes
+    if all(tag == 'equal' for tag, _, _, _, _ in opcodes):
+        return
 
     # Logic adapted from difflib.SequenceMatcher.get_grouped_opcodes
     grouped_opcodes = []
@@ -57,15 +56,26 @@ def print_pydifflib_unified_diff(content_a: str, content_b: str, fromfile: str, 
             # Large equal block: split it
 
             # End current group with context
-            group.append((tag, i1, min(i2, i1 + context), j1, min(j2, j1 + context)))
-            grouped_opcodes.append(group)
-            group = []
+            # Only apply if there is a current group (meaning preceding changes)
+            if group:
+                group.append((tag, i1, min(i2, i1 + context), j1, min(j2, j1 + context)))
+                grouped_opcodes.append(group)
+                group = []
 
             # Start next group with context
             i1 = max(i1, i2 - context)
             j1 = max(j1, j2 - context)
 
         group.append((tag, i1, i2, j1, j2))
+
+    # Trim the trailing equal block of the last group if necessary
+    if group:
+        last_tag, li1, li2, lj1, lj2 = group[-1]
+        if last_tag == 'equal':
+            # Restrict to context lines
+            new_li2 = min(li2, li1 + context)
+            new_lj2 = min(lj2, lj1 + context)
+            group[-1] = (last_tag, li1, new_li2, lj1, new_lj2)
 
     if group and not (len(group) == 1 and group[0][0] == 'equal'):
         grouped_opcodes.append(group)
@@ -100,9 +110,8 @@ def print_pydifflib_unified_diff(content_a: str, content_b: str, fromfile: str, 
                     print("+" + line, end='')
 
             # Handle missing newlines at end of file if necessary (difflib usually adds \n\ No newline...)
-            # For simplicity, we assume lines have newlines or print() adds one if missing logic below.
-            # But splitlines(keepends=True) keeps them.
             pass # print() usually adds \n, but we used end='' for lines with \n.
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show diffs between revisions or working file.")
     parser.add_argument("content_file", help="Path to the file to diff")
@@ -110,7 +119,7 @@ def main() -> None:
 
     parser.add_argument("-r", "--revision", help="Revision(s) to compare. Format: '1.1' (vs HEAD) or '1.1:1.2'")
     parser.add_argument("--srcs-dir", default=".srcs", help="Directory to store .srcs files (default: .srcs)")
-    parser.add_argument("--engine", default="difflib", choices=["difflib", "pydifflib"], help="Diff engine to use")
+    parser.add_argument("--engine", default="difflib", choices=["difflib", "pydifflib", "myers"], help="Diff engine to use")
 
     args = parser.parse_args()
 
@@ -188,7 +197,7 @@ def main() -> None:
             content_b = content_b_str
 
     # 4. Generate Diff
-    print(f"Diffing using engine: {args.engine}")
+    print(f"Diffing using engine: {args.engine}", file=sys.stderr)
     start_time = time.perf_counter()
 
     if args.engine == "difflib":
@@ -199,11 +208,26 @@ def main() -> None:
             tofile=label_b,
         )
         sys.stdout.writelines(diff_lines)
-    elif args.engine == "pydifflib":
-        print_pydifflib_unified_diff(content_a, content_b, label_a, label_b)
 
+    elif args.engine == "pydifflib":
+        # pydifflib uses streams
+        stream_a = io.BytesIO(content_a.encode('utf-8'))
+        stream_b = io.BytesIO(content_b.encode('utf-8'))
+        matcher = StreamSequenceMatcher(stream_a, stream_b, chunk_size=None)
+        lines_a = content_a.splitlines(keepends=True)
+        lines_b = content_b.splitlines(keepends=True)
+        opcodes = list(matcher.get_opcodes())
+        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
+
+    elif args.engine == "myers":
+        # Myers works on lists of lines
+        lines_a = content_a.splitlines(keepends=True)
+        lines_b = content_b.splitlines(keepends=True)
+        matcher = MyersSequenceMatcher(None, lines_a, lines_b)
+        opcodes = list(matcher.get_opcodes())
+        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
     end_time = time.perf_counter()
-    print(f"\nTime taken: {end_time - start_time:.4f}s")
+    print(f"\nTime taken: {end_time - start_time:.4f}s", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
