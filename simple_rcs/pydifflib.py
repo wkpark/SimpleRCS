@@ -18,12 +18,10 @@ class StreamSequenceMatcher:
     def __init__(self,
         a_stream: BinaryIO,
         b_stream: BinaryIO,
-        encoding: str = 'utf-8',
         chunk_size: int | None = None,
     ) -> None:
         self.a_stream = a_stream
         self.b_stream = b_stream
-        self.encoding = encoding
         self.chunk_size = chunk_size
 
         self.a_hashes: list[int] = []
