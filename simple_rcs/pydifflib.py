@@ -945,9 +945,9 @@ class StreamTextSequenceMatcher:
         self.matching_blocks = list(map(Match._make, non_adjacent))
         return self.matching_blocks
 
-    def get_opcodes(self) -> list:  # noqa: C901
+    def get_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:  # noqa: C901
         """
-        Return list of 5-tuples describing how to turn a into b.
+        Return an iterator of 5-tuples describing how to turn a into b.
         Each tuple is of the form (tag, i1, i2, j1, j2).
 
         This method works in two steps for memory efficiency:
@@ -955,13 +955,10 @@ class StreamTextSequenceMatcher:
         2.  **Fine Pass (Refinement)**: If 'chunk_size' is set (Binary Mode), it refines 'replace' blocks
             by reading the actual data chunks and comparing them byte-by-byte.
 
-        Returns:
-            - If chunk_size is None (Text/Line Mode): Returns LINE indices.
-            - If chunk_size is Set (Binary/Chunk Mode): Returns BYTE offsets.
+        Yields:
+            - If chunk_size is None (Text/Line Mode): Yields LINE indices.
+            - If chunk_size is Set (Binary/Chunk Mode): Yields BYTE offsets.
         """
-        if self.opcodes is not None:
-            return self.opcodes
-
         # --- Step 1: Coarse Pass ---
         # Get matching blocks based on HASH comparisons.
         # This tells us which chunks/lines definitely match or differ.
@@ -983,13 +980,12 @@ class StreamTextSequenceMatcher:
 
         # --- Step 2: Refinement and Offset Translation ---
         # We transform the coarse block indices into useful offsets.
-        refined_opcodes = []
 
         for tag, i1, i2, j1, j2 in coarse_opcodes:
             # Case A: Text/Line Mode (chunk_size is None)
             # We just return the line numbers. SimpleRCS expects this format.
             if self.chunk_size is None:
-                refined_opcodes.append((tag, i1, i2, j1, j2))
+                yield (tag, i1, i2, j1, j2)
                 continue
 
             # Case B: Binary/Chunk Mode (chunk_size is set)
@@ -1023,19 +1019,15 @@ class StreamTextSequenceMatcher:
                 # Use standard difflib on this small piece of data.
                 # This gives us exact byte-level differences.
                 fine_sm = difflib.SequenceMatcher(None, chunk_a, chunk_b, autojunk=False)
-                for sub_tag, sub_i1, sub_i2, sub_j1, sub_j2 in fine_sm.get_opcodes():
-                    # Map the local offsets (relative to the chunk) back to global file offsets
-                    refined_opcodes.append((
-                        sub_tag,
-                        a_start + sub_i1, a_start + sub_i2,
-                        b_start + sub_j1, b_start + sub_j2,
-                    ))
+                yield from (
+                    (sub_tag,
+                    a_start + sub_i1, a_start + sub_i2,
+                    b_start + sub_j1, b_start + sub_j2,)
+                    for sub_tag, sub_i1, sub_i2, sub_j1, sub_j2 in fine_sm.get_opcodes()
+                )
             else:
                 # For equal/insert/delete, just add the byte range.
-                refined_opcodes.append((tag, a_start, a_end, b_start, b_end))
-
-        self.opcodes = refined_opcodes
-        return self.opcodes
+                yield (tag, a_start, a_end, b_start, b_end)
 
     # Helpers for compatibility/testing
     def get_lines(self, stream_type: str) -> list[bytes]:
