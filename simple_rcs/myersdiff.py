@@ -30,9 +30,9 @@ from collections.abc import Iterator
 
 
 # Linked List Node for history trace: (tag, prev_node)
-# tag: 'e' (equal), 'i' (insert), 'd' (delete)
+# tag: 'i' (insert), 'd' (delete)
 # prev_node: reference to previous node tuple or None
-# This avoids copying lists O(N) times inside the loop.
+# We ONLY track edits (insert/delete). Equal moves are implicit and replayed.
 
 class MyersSequenceMatcher:
     """
@@ -66,129 +66,153 @@ class MyersSequenceMatcher:
         n = len(a)
         m = len(b)
         max_d = n + m
+        offset = max_d
 
-        # Frontier: {k: (x, history_node)}
+        # Frontier: list mapping k to (x, history_node)
         # k = x - y
-        frontier = {1: (0, None)}
+        # We use a list instead of dict for performance.
+        # Index = k + offset. Size = 2 * max_d + 1.
+        frontier = [(-1, None)] * (2 * max_d + 1)
 
-        final_history = None
+        # Initial Snake (d=0)
+        x = 0
+        y = 0
+        while x < n and y < m and a[x] == b[y]:
+            x += 1
+            y += 1
+
+        frontier[offset] = (x, None)
+
+        if x >= n and y >= m:
+            return self._history_to_opcodes(None)
 
         # Myers Algorithm Loop
-        for d in range(max_d + 1):
+        # We start from d=1 because d=0 (initial diagonal) is pre-calculated.
+        # Each step adds exactly one edit (insert or delete).
+        for d in range(1, max_d + 1):
+            # The range of k for depth d is [-d, d].
+            # Step is 2 because k increments by 1 (del) or decrements by 1 (ins)
+            # from the previous step's k which was (d-1) parity.
             for k in range(-d, d + 1, 2):
-                # Determine direction: down (delete) or right (insert)
-                # We go down if k == -d (left edge)
-                # Or if k != d and the x value of k-1 (up-left) is less than k+1 (down-right)
-                # Wait, Myers logic:
-                # If k == -d or (k != d and frontier[k-1].x < frontier[k+1].x):
-                #   x = frontier[k+1].x  (Move Down/Vertical from k+1) -> x same, y increases -> Insert?
-                #   Wait, x-y=k. If we come from k+1 (x_old - y_old = k+1).
-                #   We want new k. x - (y+1) = x-y-1 = k. So moving vertical decreases k.
-                #   Moving horizontal (x+1) increases k.
+                idx_k = offset + k
 
-                # Correct Myers Logic:
-                # if k == -d or (k != d and V[k-1] < V[k+1]):
-                #    x = V[k+1]
+                # Retrieve x values from previous step (d-1)
+                # k-1 comes from delete (horizontal)
+                # k+1 comes from insert (vertical)
+
+                # Check bounds for list access (though mathematically safe within logic)
+                # We use a sentinel (-1, None) for unreached states
+
+                x_minus, h_minus = frontier[idx_k - 1]
+                x_plus, h_plus = frontier[idx_k + 1]
+
+                # Myers logic:
+                # if k == -d or (k != d and x_minus < x_plus):
+                #   vertical move (insert from b): x same, y increases
                 # else:
-                #    x = V[k-1] + 1
+                #   horizontal move (delete from a): x increases
 
-                if k == -d or (k != d and frontier[k - 1][0] < frontier[k + 1][0]):
-                    old_x, history = frontier[k + 1]
-                    x = old_x
-                    # Moved vertically (y increased). From k+1 to k.
-                    # x is same, y increases.
-                    # This corresponds to INSERT from b.
-                    # Record action if not at start
-
-                    # Note: We record the action that *led* to (x, y)
-                    # Vertical move: Insert b[y-1]
-                    # Must check y > 0 because y=0 means we are at start (or only deletes happened before)
-                    if 0 < (x - k) <= m:
-                         history = ('i', history)
+                if k == -d or (k != d and x_minus < x_plus):
+                    x = x_plus
+                    history = ('i', h_plus)
                 else:
-                    old_x, history = frontier[k - 1]
-                    x = old_x + 1
-                    # Moved horizontally (x increased). From k-1 to k.
-                    # This corresponds to DELETE from a.
-                    if 0 < x <= n:
-                        history = ('d', history)
-
-                y = x - k
+                    x = x_minus + 1
+                    history = ('d', h_minus)
 
                 # Snake: Extension for matching lines (Diagonal moves)
+                # y = x - k
+                y = x - k
+
                 while x < n and y < m and a[x] == b[y]:
                     x += 1
                     y += 1
-                    history = ('e', history)
+                    # Diagonal moves are not recorded in history to save memory/time.
+                    # They will be inferred during replay.
+
+                frontier[idx_k] = (x, history)
 
                 if x >= n and y >= m:
-                    final_history = history
-                    break
+                    return self._history_to_opcodes(history)
 
-                frontier[k] = (x, history)
-
-            if final_history is not None:
-                break
-
-        return self._history_to_opcodes(final_history)
+        return iter([])
 
     def _history_to_opcodes(self, history_node) -> Iterator[tuple[str, int, int, int, int]]:
         """
         Converts the linked-list history into difflib-style grouped opcodes.
+        Replays the path from (0,0) to determine diagonal moves.
         """
         # 1. Linearize history (it is in reverse order)
-        path = []
+        ops = []
         curr = history_node
         while curr is not None:
             tag, prev = curr
-            path.append(tag)
+            ops.append(tag)
             curr = prev
-        path.reverse()
+        ops.reverse()
 
-        # 2. Convert path to opcodes
-        # Path is a sequence of 'e', 'i', 'd'.
-        # We track indices i (for a) and j (for b).
+        a = self.a
+        b = self.b
+        n = len(a)
+        m = len(b)
 
         i = 0
         j = 0
 
-        # Current grouping
-        current_tag = None
-        start_i = 0
-        start_j = 0
+        # We buffer changes to merge adjacent insert/delete into 'replace'
+        diff_start_i = 0
+        diff_start_j = 0
 
-        for op in path:
-            # Determine effective tag
-            # Myers produces 'i' and 'd'. difflib uses 'replace' for adjacent 'd' and 'i'.
-            # We can merge them later or just emit insert/delete.
-            # Git style is insert/delete. 'replace' is visual sugar.
-            # Let's map directly first: e->equal, i->insert, d->delete.
+        # Helper to emit pending diffs
+        def emit_diff(end_i, end_j):
+            nonlocal diff_start_i, diff_start_j
+            if diff_start_i < end_i and diff_start_j < end_j:
+                yield ('replace', diff_start_i, end_i, diff_start_j, end_j)
+            elif diff_start_i < end_i:
+                yield ('delete', diff_start_i, end_i, diff_start_j, end_j)
+            elif diff_start_j < end_j:
+                yield ('insert', diff_start_i, end_i, diff_start_j, end_j)
+            diff_start_i = end_i
+            diff_start_j = end_j
 
-            tag = ''
-            if op == 'e':
-                tag = 'equal'
-            elif op == 'i':
-                tag = 'insert'
-            elif op == 'd':
-                tag = 'delete'
+        # Iterator for ops
+        ops_iter = iter(ops)
 
-            if tag != current_tag:
-                if current_tag:
-                    yield (current_tag, start_i, i, start_j, j)
-
-                current_tag = tag
-                start_i = i
-                start_j = j
-
-            # Advance indices
-            if op == 'e':
+        while i < n or j < m:
+            # 1. Diagonal Slide (Equal)
+            start_i, start_j = i, j
+            while i < n and j < m and a[i] == b[j]:
                 i += 1
                 j += 1
-            elif op == 'd':
+
+            # If we moved diagonally, we have an 'equal' block.
+            if i > start_i:
+                # Flush any pending edits before the equal block
+                yield from emit_diff(start_i, start_j)
+
+                # Emit the equal block
+                yield ('equal', start_i, i, start_j, j)
+
+                # Reset diff start points to after the equal block
+                diff_start_i = i
+                diff_start_j = j
+
+            # 2. Edit Operation
+            # If we are not at the end, there must be an edit op unless we finished matching via diagonal
+            if i >= n and j >= m:
+                break
+
+            try:
+                op = next(ops_iter)
+            except StopIteration:
+                # Should not happen if path is correct and logic matches
+                break
+
+            if op == 'd':
                 i += 1
             elif op == 'i':
                 j += 1
 
-        # Yield last group
-        if current_tag:
-            yield (current_tag, start_i, i, start_j, j)
+            # We don't emit immediately. We continue loop to see if more edits follow or a diagonal.
+
+        # Flush any remaining edits at the end
+        yield from emit_diff(i, j)
