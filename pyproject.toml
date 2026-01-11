@@ -1,0 +1,76 @@
+[project]
+name = "simple_rcs"
+version = "0.1.0"
+description = "SimpleRCS version control system"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+authors = [
+    {name = "Won-Kyu Park",email = "wkpark@gmail.com"},
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.8",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+exclude = [
+    ".git",
+    ".ruff_cache",
+    "__pycache__",
+    ".venv",
+    "venv",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle error
+    "F",   # pyflakes
+    "B",   # flake8-bugbear
+    "I",   # isort
+    "W",   # pycodestyle warnings
+    "C90", # mccabe linter
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "ANN", # flake8-annotations
+    "S",   # flake8-bandit
+    "A",   # flake8-builtins
+    "COM", # flake8-commas
+    "T20"  # flake8-print
+]
+
+[tool.hatch.build]
+dev-mode-dirs = ["simple_rcs"]
+dev-mode-exact = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["simple_rcs"]
+
+[tool.hatch.build.targets.sdist]
+ignore-vcs = true
+only-include = ["simple_rcs", "README.md", "LICENSE"]
+
+[build-system]
+requires = ["setuptools", "Cython"]
+build-backend = "setuptools.build_meta"
+#requires = ["hatchling"]
+#build-backend = "hatchling.build"
+
+[tool.setuptools]
+package-dir = {"simple_rcs" = "simple_rcs"}
+ext-modules = [
+  {name = "simple_rcs._myersdiff_ses", sources = ["simple_rcs/_myersdiff_ses.pyx"]},
+  {name = "simple_rcs._myersdiff_dmp", sources = ["simple_rcs/_myersdiff_dmp.pyx"]},
+]
+
+[tool.uv.build-backend]
+# for uv_build backend
+module-name = "simple_rcs"
+module-root = "."
