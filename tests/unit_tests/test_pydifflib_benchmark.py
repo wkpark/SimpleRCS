@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from src.app.common.pydifflib import StreamSequenceMatcher
+from simple_rcs.pydifflib import StreamSequenceMatcher
 
 
 def create_large_content(num_lines=50000, modification_rate=100):

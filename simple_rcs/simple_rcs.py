@@ -9,8 +9,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import BinaryIO
 
-from src.app.common import pybsdiff
-from src.app.common.pydifflib import StreamSequenceMatcher
+from . import pybsdiff
+from .pydifflib import StreamSequenceMatcher
 
 
 logger = logging.getLogger(__name__)

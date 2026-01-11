@@ -2,7 +2,7 @@ import bz2
 import io
 import logging
 
-from src.app.common.pydifflib import RollingHashMatcher, StreamSequenceMatcher
+from .pydifflib import RollingHashMatcher, StreamSequenceMatcher
 
 
 logger = logging.getLogger(__name__)

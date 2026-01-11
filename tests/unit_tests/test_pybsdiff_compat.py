@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from src.app.common.pybsdiff import diff, patch
+from simple_rcs.pybsdiff import diff, patch
 
 
 # Check if bsdiff/bspatch are available

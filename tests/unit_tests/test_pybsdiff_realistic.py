@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from src.app.common.pybsdiff import diff, patch
+from simple_rcs.pybsdiff import diff, patch
 
 
 BSDIFF_CMD = shutil.which("bsdiff")

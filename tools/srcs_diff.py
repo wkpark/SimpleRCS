@@ -6,14 +6,11 @@ import sys
 import time
 from pathlib import Path
 
-
 # ruff: noqa: T201, ANN201
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.app.common.myersdiff import MyersSequenceMatcher
-from src.app.common.pydifflib import StreamSequenceMatcher
-from src.app.common.simple_rcs import SimpleRCS
+from simple_rcs.myersdiff import MyersSequenceMatcher
+from simple_rcs.pydifflib import StreamSequenceMatcher
+from simple_rcs.simple_rcs import SimpleRCS
 
 
 def resolve_rcs_path(target_path: Path, explicit_rcs_path: str = None, srcs_dir_name: str = ".srcs") -> Path:

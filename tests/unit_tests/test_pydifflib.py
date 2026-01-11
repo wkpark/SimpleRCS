@@ -3,7 +3,7 @@ import io
 
 import pytest
 
-from src.app.common.pydifflib import StreamSequenceMatcher
+from simple_rcs.pydifflib import StreamSequenceMatcher
 
 
 def create_bytesio(content: str, encoding: str = 'utf-8') -> io.BytesIO:

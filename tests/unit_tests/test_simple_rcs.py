@@ -3,7 +3,7 @@ import tempfile
 
 import pytest
 
-from src.app.common.simple_rcs import SimpleRCS
+from simple_rcs.simple_rcs import SimpleRCS
 
 
 @pytest.fixture

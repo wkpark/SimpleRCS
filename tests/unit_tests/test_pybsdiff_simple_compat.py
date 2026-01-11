@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from src.app.common.pybsdiff import diff, patch, _read_off_t
+from simple_rcs.pybsdiff import diff, patch, _read_off_t
 
 
 BSDIFF_CMD = shutil.which("bsdiff")

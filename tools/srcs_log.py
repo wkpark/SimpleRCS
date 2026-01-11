@@ -3,15 +3,10 @@
 import argparse
 import os
 import sys
-
-
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from datetime import datetime
 
-from src.app.common.simple_rcs import SimpleRCS
-from src.app.common.simple_rcs_gpg import get_gpg_uid, gpg_verify_callback
+from simple_rcs.simple_rcs import SimpleRCS
+from simple_rcs.simple_rcs_gpg import get_gpg_uid, gpg_verify_callback
 
 
 def print_log_entry(entry: dict, rcs: SimpleRCS, show_signature: bool = False) -> None:

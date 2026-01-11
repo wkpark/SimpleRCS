@@ -5,12 +5,8 @@ import functools
 import os
 import sys
 
-
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from src.app.common.simple_rcs import SimpleRCS
-from src.app.common.simple_rcs_gpg import gpg_sign_callback
+from simple_rcs.simple_rcs import SimpleRCS
+from simple_rcs.simple_rcs_gpg import gpg_sign_callback
 
 
 def main():
