@@ -617,26 +617,33 @@ class SimpleRCS:
 
         return None
 
-    def _generate_reverse_delta(self, new_data: str | bytes, old_data: str | bytes, encoding: str = 'base64') -> str:
+    def _generate_reverse_delta(self, new_data: str | bytes | BinaryIO, old_data: str | bytes | BinaryIO, encoding: str = 'base64') -> str:
         """
         Generates Reverse Delta.
-        If inputs are bytes, generates BSDIFF delta (base64 encoded).
+        If inputs are bytes (or BinaryIO), generates BSDIFF delta (base64 encoded).
         If inputs are strings, generates an RCS-style ('diff -n') Reverse Delta.
+        BinaryIO inputs are passed directly to StreamSequenceMatcher (text path) or
+        read once via .read() (binary path, pybsdiff requires bytes).
         """
-        if isinstance(new_data, bytes) and isinstance(old_data, bytes):
-            # Binary Diff (BSDIFF)
-            patch_data = pybsdiff.diff(new_data, old_data) # New -> Old
-            # Encode to base64 bytes, then decode to str for storage in delta block
+        new_is_stream = hasattr(new_data, 'read')
+        old_is_stream = hasattr(old_data, 'read')
+
+        if isinstance(new_data, bytes) or new_is_stream:
+            # Binary Diff (BSDIFF) — pybsdiff requires bytes
+            new_bytes = (new_data.read() if new_is_stream else new_data)
+            old_bytes = (old_data.read() if old_is_stream else
+                         (old_data if isinstance(old_data, bytes) else old_data.encode(self.encoding)))
+            patch_data = pybsdiff.diff(new_bytes, old_bytes)  # New -> Old
             encoded_bytes = self._encode_binary(patch_data, encoding=encoding)
             return encoded_bytes.decode('ascii')
-        elif isinstance(new_data, str) and isinstance(old_data, str):
+        elif isinstance(new_data, str) and (isinstance(old_data, str) or old_is_stream):
             pass
         else:
             raise TypeError("Cannot generate delta between mixed types (str/bytes)")
 
-        # Text Diff (RCS)
+        # Text Diff (RCS) — old_data stream passed directly; no BytesIO copy when already a stream
         new_stream = io.BytesIO(new_data.encode(self.encoding))
-        old_stream = io.BytesIO(old_data.encode(self.encoding))
+        old_stream = (old_data if old_is_stream else io.BytesIO(old_data.encode(self.encoding)))
 
         matcher = StreamSequenceMatcher(new_stream, old_stream, chunk_size=None)
         output = []
