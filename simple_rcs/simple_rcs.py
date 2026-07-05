@@ -510,6 +510,12 @@ class SimpleRCS:
         This is a performance optimization to avoid reading the entire history when
         we only need the latest version. Sets self.head_info = { ..., 'start': offset, 'end': offset }.
 
+        Single-pass design (inspired by moniwiki editlog_raw_lines):
+          - Chunks are accumulated in a deque as they are read (right-to-left).
+          - When "ver @" is found, HEAD block bytes are assembled from accumulated
+            chunks without a second seek+read — total I/O equals HEAD block size once.
+          - No arbitrary size limit: works correctly for HEAD blocks of any size.
+
         Caching: skips the backward scan if the stream size is unchanged since the last call.
         Pass force=True to bypass the cache (e.g. after external writes to the stream).
         """
@@ -526,45 +532,43 @@ class SimpleRCS:
             self._head_cache_size = 0
             return
 
-        # Scan backwards one chunk at a time.
-        # Keep a small overlap from the right chunk to handle "ver @" / "version @"
-        # patterns that cross a chunk boundary (max keyword len - 1 = 8 bytes).
         CHUNK = 4096
         OVERLAP = 8  # len("version @") - 1
 
         pos = file_size
-        tail_prefix = b""  # first OVERLAP bytes of the chunk immediately to our right
+        # collected: chunks in right-to-left read order (index 0 = rightmost / EOF side).
+        # Mirrors moniwiki's $last accumulation — nothing is discarded.
+        collected: list[bytes] = []
+        tail_prefix = b""
 
         while pos > 0:
             read_size = min(CHUNK, pos)
             pos -= read_size
             self.stream.seek(pos)
             chunk = self.stream.read(read_size)
+            collected.append(chunk)
 
-            # Search region: current chunk + small prefix from the chunk to its right.
-            # rfind gives the rightmost (most recent) occurrence in this window.
+            # Search for the rightmost "ver @" in this chunk + OVERLAP bytes of the
+            # chunk to its right (to catch patterns split across a boundary).
             search_buf = chunk + tail_prefix
-            idx_v = search_buf.rfind(b"ver @")
-            idx_version = search_buf.rfind(b"version @")
-            idx = max(idx_v, idx_version)
+            idx = max(search_buf.rfind(b"ver @"), search_buf.rfind(b"version @"))
 
             if idx != -1:
                 abs_start = pos + idx
-
-                self.stream.seek(abs_start)
-                block_bytes = self.stream.read()  # HEAD is always at the end
-                parsed = self._parse_block_content_no_regex(block_bytes)
+                # Assemble HEAD block from already-read chunks — no second seek+read.
+                # collected[-1] is the current (leftmost) chunk; collected[0] is the
+                # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
+                head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
+                parsed = self._parse_block_content_no_regex(head_bytes)
                 if parsed:
                     parsed['start'] = abs_start
                     parsed['end'] = file_size
                     self.head_info = parsed
                     self._head_cache_size = file_size
                     return
+                # Parsed failed (false positive inside binary data) — keep scanning left.
 
             tail_prefix = chunk[:OVERLAP]
-
-            if file_size - pos > 10 * 1024 * 1024:  # Safety limit: 10 MB scan window
-                break
 
         self._head_cache_size = file_size
 
