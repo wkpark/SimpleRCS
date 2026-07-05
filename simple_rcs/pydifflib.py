@@ -65,7 +65,7 @@ class StreamSequenceMatcher:
             if not self.chunk_size: # Line-based mode
                 content_to_hash = chunk.rstrip(b'\r\n')
 
-            chunk_hash = hash(content_to_hash)
+            chunk_hash = zlib.crc32(content_to_hash) & 0xFFFFFFFF
             hash_list.append(chunk_hash)
 
             if hash_map is not None:
@@ -520,54 +520,46 @@ class RollingHashMatcher:
         h = ((s2 << 16) | s1) & 0xFFFFFFFF
         return h, s1, s2
 
-    def _verify_and_extend_match(
+    def _verify_and_extend_match_stream(
         self,
         old_offset: int,
         new_offset: int,
-        b_data: bytes,
-        max_extend: int = 1024 * 1024,  # 1MB extension limit
+        b_size: int,
+        max_extend: int = 1024 * 1024,
     ) -> int:
         """
-        Verify chunk match and extend it as far as possible.
+        Verify chunk match and extend it by reading both streams sequentially.
         Returns the total matched length (0 if no match).
         """
-        # First verify the initial chunk
+        CHUNK = self.chunk_size
+        EXTEND_BUF = 8192
+
         self.a_stream.seek(old_offset)
-        old_chunk = self.a_stream.read(self.chunk_size)
+        self.b_stream.seek(new_offset)
+        old_chunk = self.a_stream.read(CHUNK)
+        new_chunk = self.b_stream.read(CHUNK)
 
-        new_chunk = b_data[new_offset:new_offset + self.chunk_size]
-
-        if old_chunk != new_chunk:
+        if old_chunk != new_chunk or len(old_chunk) < CHUNK:
             return 0
 
-        matched_len = self.chunk_size
+        matched_len = CHUNK
+        remaining = min(
+            self.a_size - (old_offset + CHUNK),
+            b_size - (new_offset + CHUNK),
+            max_extend - CHUNK,
+        )
 
-        # Try to extend the match
-        remaining_new = len(b_data) - (new_offset + matched_len)
-        remaining_old = self.a_size - (old_offset + matched_len)
-        extend_limit = min(remaining_new, remaining_old, max_extend)
-
-        if extend_limit > 0:
-            # Read extension data in chunks for efficiency
-            EXTEND_CHUNK = 8192
-            extended = 0
-
-            while extended < extend_limit:
-                read_size = min(EXTEND_CHUNK, extend_limit - extended)
-
-                self.a_stream.seek(old_offset + matched_len + extended)
-                old_ext = self.a_stream.read(read_size)
-                new_ext = b_data[new_offset + matched_len + extended:
-                               new_offset + matched_len + extended + read_size]
-
-                # Find common prefix
-                mismatch_idx = self._find_mismatch(old_ext, new_ext)
-                extended += mismatch_idx
-
-                if mismatch_idx < len(old_ext):
-                    break  # Found mismatch
-
-            matched_len += extended
+        while remaining > 0:
+            read_size = min(EXTEND_BUF, remaining)
+            old_ext = self.a_stream.read(read_size)
+            new_ext = self.b_stream.read(read_size)
+            if not old_ext or not new_ext:
+                break
+            mismatch_idx = self._find_mismatch(old_ext, new_ext)
+            matched_len += mismatch_idx
+            remaining -= read_size
+            if mismatch_idx < min(len(old_ext), len(new_ext)):
+                break
 
         return matched_len
 
@@ -585,104 +577,113 @@ class RollingHashMatcher:
         Scan new file using rolling hash to find matches in old file.
         Yields (tag, i1, i2, j1, j2) where:
         - 'equal': matched block (copy from old file)
-        - 'insert': new data to insert
-        - 'delete': gap in old file (seek forward)
+        - 'insert': new data not in old file
+        - 'delete': gap in old file (data skipped)
 
         Byte offsets: i1, i2 are in old file; j1, j2 are in new file.
+
+        Streaming: b_stream is read sequentially without loading into memory.
+        Memory usage: O(chunk_size + read_ahead_buffer).
         """
-        self.b_stream.seek(0)
+        WINDOW = self.chunk_size
+        READ_AHEAD = max(WINDOW * 4, 65536)
+
         b_size = self._get_file_size(self.b_stream)
-
-        # For memory efficiency, check if we can load entire new file
-        if b_size > self.max_memory:
-            raise MemoryError(
-                f"New file ({b_size} bytes) exceeds max_memory limit "
-                f"({self.max_memory} bytes). Increase max_memory or use streaming.",
-            )
-
-        # Load new file into memory for faster access
         self.b_stream.seek(0)
-        b_data = self.b_stream.read()
 
-        # Initialize scanning state
-        i = 0  # Current position in new file
+        # Read initial window
+        first_win = self.b_stream.read(WINDOW)
+        if len(first_win) < WINDOW:
+            if first_win:
+                yield ('insert', 0, 0, 0, len(first_win))
+            return
+
+        # Circular buffer holds exactly WINDOW bytes of the sliding window.
+        # win_head always points to the oldest byte (= next out_byte).
+        win = bytearray(first_win)
+        win_head = 0
+        h, s1, s2 = self._compute_adler32_components(bytes(win))
+
+        # Read-ahead buffer: sequential bytes arriving from b_stream past the window
+        b_ahead = bytearray()
+        b_ahead_idx = 0
+        b_stream_pos = WINDOW  # absolute position in b_stream for next read
+
+        def _next_in_byte() -> int:
+            """Read next incoming byte for the rolling window. Returns -1 at EOF."""
+            nonlocal b_ahead, b_ahead_idx, b_stream_pos
+            if b_ahead_idx >= len(b_ahead):
+                self.b_stream.seek(b_stream_pos)
+                raw = self.b_stream.read(READ_AHEAD)
+                if not raw:
+                    return -1
+                b_ahead = bytearray(raw)
+                b_ahead_idx = 0
+                b_stream_pos += len(raw)
+            val = b_ahead[b_ahead_idx]
+            b_ahead_idx += 1
+            return val
+
+        def _reset_window(pos: int) -> bool:
+            """Re-initialize window and read-ahead at absolute position pos. Returns False at EOF."""
+            nonlocal win, win_head, h, s1, s2, b_ahead, b_ahead_idx, b_stream_pos
+            self.b_stream.seek(pos)
+            new_win = self.b_stream.read(WINDOW)
+            if len(new_win) < WINDOW:
+                return False
+            win = bytearray(new_win)
+            win_head = 0
+            h, s1, s2 = self._compute_adler32_components(bytes(win))
+            b_stream_pos = pos + WINDOW
+            b_ahead = bytearray()
+            b_ahead_idx = 0
+            return True
+
+        i = 0  # absolute start of current window in b_stream
         pending_insert_start = 0
         last_old_pos = 0
 
-        # Initialize rolling hash window
-        if len(b_data) >= self.chunk_size:
-            h, s1, s2 = self._compute_adler32_components(b_data[:self.chunk_size])
-            window_ready = True
-        else:
-            h, s1, s2 = 1, _OFFS, 0
-            window_ready = False
-
-        # Main scanning loop
-        while i < len(b_data):
+        while i + WINDOW <= b_size:
             best_match_len = 0
             best_old_offset = -1
 
-            # Check for matches only if we have a full window
-            if window_ready and (i + self.chunk_size <= len(b_data)):
-                candidates = self.a_map.get(h, [])
+            candidates = self.a_map.get(h, [])
+            for old_offset in candidates[:20]:
+                match_len = self._verify_and_extend_match_stream(old_offset, i, b_size)
+                if match_len > best_match_len:
+                    best_match_len = match_len
+                    best_old_offset = old_offset
+                    if match_len > WINDOW * 4:
+                        break
 
-                # Limit candidate checking to avoid O(n²) behavior
-                MAX_CANDIDATES = 20
-
-                for old_offset in candidates[:MAX_CANDIDATES]:
-                    match_len = self._verify_and_extend_match(old_offset, i, b_data)
-
-                    if match_len > best_match_len:
-                        best_match_len = match_len
-                        best_old_offset = old_offset
-
-                        # Early exit for very long matches
-                        if match_len > self.chunk_size * 4:
-                            break
-
-            # Process match if found
             if best_match_len > 0:
-                # Yield pending inserts
                 if i > pending_insert_start:
                     yield ('insert', 0, 0, pending_insert_start, i)
-
-                # Yield delete/seek if old file position changed
                 if best_old_offset != last_old_pos:
                     yield ('delete', last_old_pos, best_old_offset, i, i)
-
-                # Yield match
                 yield ('equal', best_old_offset, best_old_offset + best_match_len,
                        i, i + best_match_len)
 
-                # Advance position
                 i += best_match_len
                 pending_insert_start = i
                 last_old_pos = best_old_offset + best_match_len
 
-                # Reinitialize hash at new position
-                if i + self.chunk_size <= len(b_data):
-                    h, s1, s2 = self._compute_adler32_components(
-                        b_data[i:i + self.chunk_size],
-                    )
-                    window_ready = True
-                else:
-                    window_ready = False
-
+                if not _reset_window(i):
+                    break
                 continue
 
-            # No match found - roll the window forward by one byte
-            if i + self.chunk_size < len(b_data):
-                out_byte = b_data[i]
-                in_byte = b_data[i + self.chunk_size]
-                h, s1, s2 = self._roll_hash(s1, s2, out_byte, in_byte)
-                i += 1
-            else:
-                # Approaching EOF - can't maintain full window
+            # Roll window one byte forward
+            in_byte_val = _next_in_byte()
+            if in_byte_val < 0:
                 break
+            out_byte_val = win[win_head]
+            h, s1, s2 = self._roll_hash(s1, s2, out_byte_val, in_byte_val)
+            win[win_head] = in_byte_val
+            win_head = (win_head + 1) % WINDOW
+            i += 1
 
-        # Flush remaining inserts
-        if pending_insert_start < len(b_data):
-            yield ('insert', 0, 0, pending_insert_start, len(b_data))
+        if pending_insert_start < b_size:
+            yield ('insert', 0, 0, pending_insert_start, b_size)
 
 
 Match = namedtuple('Match', 'a b size')
@@ -763,7 +764,7 @@ class StreamTextSequenceMatcher:
             if not self.chunk_size:
                 content_to_hash = chunk.rstrip(b'\r\n')
 
-            chunk_hash = hash(content_to_hash)
+            chunk_hash = zlib.crc32(content_to_hash) & 0xFFFFFFFF
             hash_list.append(chunk_hash)
 
         return hash_list

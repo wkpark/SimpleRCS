@@ -27,6 +27,7 @@
 # Optimized for use as a difflib-compatible matcher.
 
 import os
+import zlib
 from collections.abc import Iterator
 from typing import BinaryIO
 
@@ -254,7 +255,7 @@ class MyersStreamSequenceMatcher:
 
             offset_list.append(start_offset)
             content_to_hash = chunk if self.chunk_size else chunk.rstrip(b'\r\n')
-            hash_list.append(hash(content_to_hash))
+            hash_list.append(zlib.crc32(content_to_hash) & 0xFFFFFFFF)
         return hash_list
 
     def _get_byte_offset(self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:

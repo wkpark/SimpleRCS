@@ -140,6 +140,7 @@ class SimpleRCS:
             raise ValueError("Invalid input type. Expected file path, string, bytes, or file-like object.")
 
         self.head_info: dict | None = None
+        self._head_cache_size: int = -1  # stream size at last successful _load_head scan
         self._load_head()
 
     def _write_v2_header(self) -> None:
@@ -370,7 +371,7 @@ class SimpleRCS:
             # Length-Based Parsing Check
             # Check if value starts with "<digits>;"
             # Only allow for 'binary' or 'delta' keys to prevent collisions in 'text' fields
-            allow_length_based = (key_bytes == b'binary') or (key_bytes == b'delta')
+            allow_length_based = (key_bytes == b'binary')
 
             is_length_based = False
             data_len = 0
@@ -503,54 +504,69 @@ class SimpleRCS:
             return data
         return {}
 
-    def _load_head(self) -> None:
+    def _load_head(self, force: bool = False) -> None:
         """
         Locates and loads ONLY the last block (HEAD) by scanning backwards from EOF.
         This is a performance optimization to avoid reading the entire history when
         we only need the latest version. Sets self.head_info = { ..., 'start': offset, 'end': offset }.
-        """
-        self.head_info = None
 
-        # Move to End of File
+        Caching: skips the backward scan if the stream size is unchanged since the last call.
+        Pass force=True to bypass the cache (e.g. after external writes to the stream).
+        """
         self.stream.seek(0, os.SEEK_END)
         file_size = self.stream.tell()
-        if file_size == 0:
+
+        # Cache: skip expensive scan when stream size is unchanged
+        if not force and self.head_info is not None and file_size == self._head_cache_size:
             return
 
-        chunk_size = 4096
-        pos = file_size
-        buffer = b""
+        self.head_info = None
 
-        # Scan backwards, reading chunks
+        if file_size == 0:
+            self._head_cache_size = 0
+            return
+
+        # Scan backwards one chunk at a time.
+        # Keep a small overlap from the right chunk to handle "ver @" / "version @"
+        # patterns that cross a chunk boundary (max keyword len - 1 = 8 bytes).
+        CHUNK = 4096
+        OVERLAP = 8  # len("version @") - 1
+
+        pos = file_size
+        tail_prefix = b""  # first OVERLAP bytes of the chunk immediately to our right
+
         while pos > 0:
-            read_size = min(chunk_size, pos)
+            read_size = min(CHUNK, pos)
             pos -= read_size
             self.stream.seek(pos)
             chunk = self.stream.read(read_size)
-            buffer = chunk + buffer # Prepend to buffer
 
-            # Find the LAST match of the block start pattern (ver @...) in the buffer
-            # We assume keywords are ASCII.
-            idx_v = buffer.rfind(b"ver @")
-            idx_version = buffer.rfind(b"version @") # For backward compatibility in parsing
+            # Search region: current chunk + small prefix from the chunk to its right.
+            # rfind gives the rightmost (most recent) occurrence in this window.
+            search_buf = chunk + tail_prefix
+            idx_v = search_buf.rfind(b"ver @")
+            idx_version = search_buf.rfind(b"version @")
             idx = max(idx_v, idx_version)
 
             if idx != -1:
-                abs_start = pos + idx # Absolute offset in the stream
+                abs_start = pos + idx
 
-                # Read and parse the block from this offset to EOF
                 self.stream.seek(abs_start)
-                block_bytes = self.stream.read() # Read until EOF (HEAD is always at the end)
-
+                block_bytes = self.stream.read()  # HEAD is always at the end
                 parsed = self._parse_block_content_no_regex(block_bytes)
                 if parsed:
                     parsed['start'] = abs_start
                     parsed['end'] = file_size
                     self.head_info = parsed
+                    self._head_cache_size = file_size
                     return
 
-            if len(buffer) > 10 * 1024 * 1024: # Safety limit (10MB) to prevent excessive buffering
+            tail_prefix = chunk[:OVERLAP]
+
+            if file_size - pos > 10 * 1024 * 1024:  # Safety limit: 10 MB scan window
                 break
+
+        self._head_cache_size = file_size
 
     def _get_prev_block(self, current_start_offset: int) -> dict | None:
         """
