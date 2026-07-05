@@ -831,7 +831,7 @@ class SimpleRCS:
 
     def commit(  # noqa: C901
         self,
-        content: str | bytes,
+        content: str | bytes | BinaryIO,
         author: str = "unknown",
         log: str = "",
         signer_callbacks: list[Callable[[str], tuple[str, str]]] | None = None,
@@ -856,6 +856,11 @@ class SimpleRCS:
                       intermediate snapshot for faster retrieval.
             encoding: Encoding to use for binary data ('base64' or 'base85').
         """
+        # BinaryIO → bytes: HEAD block requires full snapshot; one read is unavoidable.
+        if hasattr(content, 'read'):
+            content.seek(0)
+            content = content.read()
+
         self._load_head() # Refresh HEAD info by scanning the stream
         now = date if date else datetime.now().isoformat()
 
