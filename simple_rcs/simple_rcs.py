@@ -141,6 +141,7 @@ class SimpleRCS:
 
         self.head_info: dict | None = None
         self._head_cache_size: int = -1  # stream size at last successful _load_head scan
+        self._head_meta_only: bool = False  # True when cached head_info has no 'text'
         self._load_head()
 
     def _write_v2_header(self) -> None:
@@ -504,7 +505,220 @@ class SimpleRCS:
             return data
         return {}
 
-    def _load_head(self, force: bool = False) -> None:
+    def _parse_block_meta_from_stream(self, abs_start: int, block_end: int) -> dict:  # noqa: C901
+        """
+        Parse block metadata directly from the stream without loading the full content.
+
+        Strategy (inspired by moniwiki editlog_raw_lines):
+          - Meta fields (ver/date/author/log/hash/sig): read and parse normally.
+          - binary field: parse length header, seek past N bytes — zero decode.
+          - delta/text field: scan for closing @; byte-by-byte — no bytes collected.
+
+        Returns a dict with meta fields plus:
+          content_stream_offset, content_length, content_encoding  (for lazy checkout)
+        """
+        CHUNK = 8192
+        _meta_kw  = {b'ver', b'version', b'date', b'author', b'log',
+                     b'prev_hash', b'hash', b'signature'}
+        _skip_kw  = {b'binary', b'text', b'delta'}
+        _all_kw   = _meta_kw | _skip_kw
+
+        self.stream.seek(abs_start)
+        buf = b""
+        stream_cursor = abs_start   # next read position in stream
+        buf_origin    = abs_start   # stream offset of buf[0]
+
+        def _fill():
+            nonlocal buf, stream_cursor
+            want = min(CHUNK, block_end - stream_cursor)
+            if want <= 0:
+                return
+            chunk = self.stream.read(want)
+            if not chunk:          # premature EOF (truncated/corrupted file)
+                stream_cursor = block_end
+                return
+            buf += chunk
+            stream_cursor += len(chunk)
+
+        def _ensure(n, pos):
+            # ensure buf[pos:pos+n] is loaded
+            while len(buf) - pos < n and stream_cursor < block_end:
+                _fill()
+
+        _fill()
+        data: dict = {}
+        pos = 0
+
+        while True:
+            # skip whitespace
+            while pos < len(buf) and buf[pos] in b' \t\r\n':
+                pos += 1
+            if pos >= len(buf):
+                if stream_cursor < block_end:
+                    _fill()
+                    continue
+                break
+
+            # read keyword
+            key_start = pos
+            while pos < len(buf) and buf[pos] not in b' @;\t\r\n':
+                pos += 1
+                if pos >= len(buf) and stream_cursor < block_end:
+                    _fill()
+            key_bytes = buf[key_start:pos]
+
+            if key_bytes not in _all_kw:
+                break
+
+            # skip whitespace before '@'
+            while pos < len(buf) and buf[pos] in b' \t':
+                pos += 1
+                if pos >= len(buf) and stream_cursor < block_end:
+                    _fill()
+
+            if pos >= len(buf) or buf[pos] != ord('@'):
+                break
+            pos += 1  # skip opening '@'
+
+            if key_bytes in _meta_kw:
+                # delimiter-based read — collect until unescaped '@'
+                val_parts = []
+                while True:
+                    _ensure(1, pos)
+                    if pos >= len(buf):
+                        break
+                    at = buf.find(b'@', pos)
+                    if at == -1:
+                        val_parts.append(buf[pos:])
+                        pos = len(buf)
+                        continue
+                    _ensure(2, at)
+                    if at + 1 < len(buf) and buf[at + 1] == ord('@'):
+                        val_parts.append(buf[pos:at])
+                        val_parts.append(b'@')
+                        pos = at + 2
+                    else:
+                        val_parts.append(buf[pos:at])
+                        pos = at + 1
+                        break
+                value = b''.join(val_parts).decode(self.encoding, errors='replace')
+                # skip optional whitespace + ';'
+                _ensure(2, pos)
+                while pos < len(buf) and buf[pos] in b' \t\r\n':
+                    pos += 1
+                if pos < len(buf) and buf[pos] == ord(';'):
+                    pos += 1
+
+                key_str = key_bytes.decode()
+                if key_str == 'version':
+                    key_str = 'ver'
+                if key_str == 'signature':
+                    data.setdefault('signatures', []).append(value)
+                else:
+                    data[key_str] = value
+
+            elif key_bytes == b'binary':
+                # length-based: "N;encoding,<N bytes>@;"
+                _ensure(50, pos)
+                peek = buf[pos:pos + 50]
+                semi = peek.find(b';')
+                if semi != -1 and peek[:semi].isdigit():
+                    data_len = int(peek[:semi])
+                    comma = peek.find(b',', semi)
+                    if comma != -1:
+                        enc_str = peek[semi + 1:comma].decode('ascii', errors='replace')
+                        header_len = comma + 1
+                        content_abs = buf_origin + pos + header_len
+                        data['content_stream_offset'] = content_abs
+                        data['content_length']        = data_len
+                        data['content_encoding']      = enc_str
+                        data['is_binary'] = True
+                        data['is_delta']  = False
+                        # seek past content + closing '@' + ';'
+                        skip_to = content_abs + data_len + 1  # +1 = closing '@'
+                        self.stream.seek(skip_to)
+                        stream_cursor = skip_to
+                        buf = b""
+                        pos = 0
+                        buf_origin = skip_to
+                        _fill()
+                        # skip ';'
+                        while pos < len(buf) and buf[pos] in b' \t\r\n':
+                            pos += 1
+                        if pos < len(buf) and buf[pos] == ord(';'):
+                            pos += 1
+
+            else:  # delta / text — scan for unescaped '@' then ';', no collection
+                data['is_delta'] = (key_bytes == b'delta')
+                # Peek to detect binary (length-based) delta: starts with "N;encoding,"
+                use_seek_skip = False
+                if key_bytes == b'delta':
+                    _ensure(50, pos)
+                    peek = buf[pos:pos + 50]
+                    semi = peek.find(b';')
+                    comma = peek.find(b',', semi) if semi != -1 else -1
+                    is_len_based = (semi != -1 and peek[:semi].isdigit() and comma != -1)
+                    data['is_binary'] = is_len_based
+                    if is_len_based:
+                        enc_str = peek[semi + 1:comma].decode('ascii', errors='replace')
+                        # base64 charset has no '@', so _escape is a no-op and
+                        # the stored byte count equals N exactly — seek skip is safe.
+                        # base85/raw can contain '@' which _escape turns into '@@',
+                        # making the stored length > N, so seek skip would overshoot.
+                        use_seek_skip = (enc_str == 'base64')
+                else:
+                    data['is_binary'] = False
+
+                if use_seek_skip:
+                    # base64 binary delta: skip N bytes of encoded content via seek
+                    data_len = int(peek[:semi])
+                    header_len = comma + 1  # bytes of "N;base64," prefix
+                    content_abs = buf_origin + pos + header_len
+                    skip_to = content_abs + data_len + 1  # +1 = closing '@'
+                    self.stream.seek(skip_to)
+                    stream_cursor = skip_to
+                    buf = b""
+                    pos = 0
+                    buf_origin = skip_to
+                    _fill()
+                    # skip ';'
+                    while pos < len(buf) and buf[pos] in b' \t\r\n':
+                        pos += 1
+                    if pos < len(buf) and buf[pos] == ord(';'):
+                        pos += 1
+                else:
+                    # text delta or base85 delta: scan for unescaped '@'.
+                    # buf grows monotonically up to O(delta_size) — no seek available
+                    # because base85 '@' chars are stored as '@@', making stored len > N.
+                    while True:
+                        _ensure(2, pos)
+                        if pos >= len(buf):
+                            # _ensure postcondition: stream_cursor >= block_end here
+                            break
+                        at = buf.find(b'@', pos)
+                        if at == -1:
+                            pos = len(buf)
+                            continue
+                        _ensure(2, at)
+                        if at + 1 < len(buf) and buf[at + 1] == ord('@'):
+                            pos = at + 2  # escaped @@
+                        else:
+                            pos = at + 1  # closing '@'
+                            break
+                    # skip ';'
+                    _ensure(2, pos)
+                    while pos < len(buf) and buf[pos] in b' \t\r\n':
+                        pos += 1
+                    if pos < len(buf) and buf[pos] == ord(';'):
+                        pos += 1
+
+        if 'ver' in data:
+            data.setdefault('is_delta',  False)
+            data.setdefault('is_binary', False)
+            return data
+        return {}
+
+    def _load_head(self, force: bool = False, metadata_only: bool = False) -> None:
         """
         Locates and loads ONLY the last block (HEAD) by scanning backwards from EOF.
         This is a performance optimization to avoid reading the entire history when
@@ -522,9 +736,11 @@ class SimpleRCS:
         self.stream.seek(0, os.SEEK_END)
         file_size = self.stream.tell()
 
-        # Cache: skip expensive scan when stream size is unchanged
+        # Cache: skip expensive scan when stream size is unchanged.
+        # Full-content callers (metadata_only=False) require 'text' in cache.
         if not force and self.head_info is not None and file_size == self._head_cache_size:
-            return
+            if metadata_only or not self._head_meta_only:
+                return
 
         self.head_info = None
 
@@ -546,7 +762,10 @@ class SimpleRCS:
             pos -= read_size
             self.stream.seek(pos)
             chunk = self.stream.read(read_size)
-            collected.append(chunk)
+            if not metadata_only:
+                # metadata_only path reads directly via _parse_block_meta_from_stream;
+                # no need to accumulate chunks for head_bytes assembly.
+                collected.append(chunk)
 
             # Search for the rightmost "ver @" in this chunk + OVERLAP bytes of the
             # chunk to its right (to catch patterns split across a boundary).
@@ -555,16 +774,20 @@ class SimpleRCS:
 
             if idx != -1:
                 abs_start = pos + idx
-                # Assemble HEAD block from already-read chunks — no second seek+read.
-                # collected[-1] is the current (leftmost) chunk; collected[0] is the
-                # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
-                head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
-                parsed = self._parse_block_content_no_regex(head_bytes)
+                if metadata_only:
+                    parsed = self._parse_block_meta_from_stream(abs_start, file_size)
+                else:
+                    # Assemble HEAD block from already-read chunks — no second seek+read.
+                    # collected[-1] is the current (leftmost) chunk; collected[0] is the
+                    # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
+                    head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
+                    parsed = self._parse_block_content_no_regex(head_bytes)
                 if parsed:
                     parsed['start'] = abs_start
                     parsed['end'] = file_size
                     self.head_info = parsed
                     self._head_cache_size = file_size
+                    self._head_meta_only = metadata_only
                     return
                 # Parsed failed (false positive inside binary data) — keep scanning left.
 
@@ -572,10 +795,14 @@ class SimpleRCS:
 
         self._head_cache_size = file_size
 
-    def _get_prev_block(self, current_start_offset: int) -> dict | None:
+    def _get_prev_block(self, current_start_offset: int, metadata_only: bool = False) -> dict | None:
         """
         Finds and parses the block immediately preceding the given offset.
         Used for traversing history backwards (HEAD -> V_prev -> ...).
+
+        metadata_only=True skips content decoding (binary seek, delta scan).
+        Returned dict has content_stream_offset/content_length/content_encoding
+        instead of 'text'. Used by log() to avoid decoding large payloads.
         """
         if current_start_offset <= 0:
             return None
@@ -608,12 +835,15 @@ class SimpleRCS:
             if idx != -1:
                 abs_start = scan_pos + idx # Absolute offset of previous block's start
 
-                # Read block from start up to the next block's start
-                self.stream.seek(abs_start)
-                length = current_start_offset - abs_start
-                block_bytes = self.stream.read(length)
+                if metadata_only:
+                    parsed = self._parse_block_meta_from_stream(abs_start, current_start_offset)
+                else:
+                    # Read block from start up to the next block's start
+                    self.stream.seek(abs_start)
+                    length = current_start_offset - abs_start
+                    block_bytes = self.stream.read(length)
+                    parsed = self._parse_block_content_no_regex(block_bytes)
 
-                parsed = self._parse_block_content_no_regex(block_bytes)
                 if parsed:
                     parsed['start'] = abs_start
                     parsed['end'] = current_start_offset
@@ -1090,7 +1320,7 @@ class SimpleRCS:
             reverse: If True, returns history in chronological order (oldest first).
                      Default is False (newest first).
         """
-        self._load_head()
+        self._load_head(metadata_only=True)
         if not self.head_info:
             return []
 
@@ -1117,7 +1347,7 @@ class SimpleRCS:
             if limit and len(history) >= limit:
                 break
 
-            prev_block = self._get_prev_block(curr_block['start'])
+            prev_block = self._get_prev_block(curr_block['start'], metadata_only=True)
             if not prev_block:
                 break
             curr_block = prev_block
