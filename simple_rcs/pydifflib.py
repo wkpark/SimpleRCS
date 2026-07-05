@@ -246,9 +246,9 @@ class StreamSequenceMatcher:
             return
 
         # Binary mode: convert to byte offsets
-        a_start = self._get_byte_offset(self.a_offsets, i1)
+        a_start = self._get_byte_offset(self.a_offsets, i1, stream=self.a_stream)
         a_end = self._get_byte_offset(self.a_offsets, i2, is_end=True, stream=self.a_stream)
-        b_start = self._get_byte_offset(self.b_offsets, j1)
+        b_start = self._get_byte_offset(self.b_offsets, j1, stream=self.b_stream)
         b_end = self._get_byte_offset(self.b_offsets, j2, is_end=True, stream=self.b_stream)
 
         if tag == 'replace':
@@ -290,7 +290,18 @@ class StreamSequenceMatcher:
         b_idx = 0
 
         # Adaptive anchor length heuristics
-        BASE_MIN_MATCH = 24 # Base minimum match length
+        BASE_MIN_MATCH = 24  # Base minimum match length
+
+        # For small blocks, greedy anchor-based approach degrades: minimum anchor (BASE_MIN_MATCH)
+        # can exceed the data size, making all-or-nothing matching. Fall back to difflib for
+        # exact byte-level refinement.
+        if len_a <= BASE_MIN_MATCH or len_b <= BASE_MIN_MATCH:
+            fine_sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+            for sub_tag, sub_i1, sub_i2, sub_j1, sub_j2 in fine_sm.get_opcodes():
+                yield (sub_tag,
+                       a_global_offset + sub_i1, a_global_offset + sub_i2,
+                       b_global_offset + sub_j1, b_global_offset + sub_j2)
+            return
 
         # Search window limit: Adaptive, capped at 1MB to balance performance and coverage.
         # Uses a wider window (64KB base) for larger files, scaling up to 1MB.

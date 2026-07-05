@@ -253,7 +253,7 @@ class MyersStreamSequenceMatcher:
                 break
 
             offset_list.append(start_offset)
-            content_to_hash = chunk if self.chunk_size else chunk.rstrip(b'\\r\\n')
+            content_to_hash = chunk if self.chunk_size else chunk.rstrip(b'\r\n')
             hash_list.append(hash(content_to_hash))
         return hash_list
 

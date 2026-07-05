@@ -1219,7 +1219,11 @@ class SimpleRCS:
             delta = prev_block['text']
 
             # Stop blame if we hit binary data or binary delta
-            if prev_block.get('is_binary', False) or (prev_block.get('is_delta', False) and ";base64," in str(delta)):
+            is_binary_delta = (
+                (isinstance(delta, bytes) and (b";base64," in delta or b";base85," in delta or b";raw," in delta))
+                or (isinstance(delta, str) and (";base64," in delta or ";base85," in delta))
+            )
+            if prev_block.get('is_binary', False) or (prev_block.get('is_delta', False) and is_binary_delta):
                  for item in tracker:
                     if item['head_index'] is not None:
                         if final_blame[item['head_index']] is None:
@@ -1340,7 +1344,7 @@ class SimpleRCS:
 
         if calculated_hash != stored_hash:
             logger.error(f"Error: HEAD hash mismatch. Stored: {stored_hash},"
-                "Calculated: {calculated_hash}. Cannot sign corrupted block.")
+                f"Calculated: {calculated_hash}. Cannot sign corrupted block.")
             return False
 
         # Generate new signatures

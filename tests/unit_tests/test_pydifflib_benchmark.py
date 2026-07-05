@@ -69,7 +69,7 @@ def test_benchmark_and_correctness():
     # 4. Correctness Check (Opcodes Match)
     print("Verifying Opcodes Correctness (pydifflib vs standard difflib)...")
 
-    pydifflib_opcodes = pydiff_matcher.get_opcodes()
+    pydifflib_opcodes = list(pydiff_matcher.get_opcodes())
     difflib_opcodes_from_stripped = list(std_matcher_core.get_opcodes())
 
     # Due to the greedy nature of `StreamSequenceMatcher`'s `get_opcodes`

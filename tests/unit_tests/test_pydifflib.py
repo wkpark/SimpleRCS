@@ -45,7 +45,7 @@ def test_line_mode_opcodes(text_streams):
         ('equal', 2, 3, 2, 3),
         ('insert', 3, 3, 3, 4),
     ]
-    assert opcodes == expected
+    assert list(opcodes) == expected
 
 def test_compare_with_difflib_text():
     # Verify exact match with standard difflib for text
@@ -56,7 +56,7 @@ def test_compare_with_difflib_text():
     stream_b = create_bytesio("".join(lines_b))
 
     pydiff = StreamSequenceMatcher(stream_a, stream_b, chunk_size=None)
-    pydiff_opcodes = pydiff.get_opcodes()
+    pydiff_opcodes = list(pydiff.get_opcodes())
 
     # Standard difflib
     # Note: pydifflib hashes lines stripped of \r\n
@@ -70,7 +70,7 @@ def test_compare_with_difflib_text():
     # They should produce same opcodes if equality holds.
 
     std_diff = difflib.SequenceMatcher(None, lines_a, lines_b, autojunk=False)
-    std_opcodes = std_diff.get_opcodes()
+    std_opcodes = list(std_diff.get_opcodes())
 
     assert pydiff_opcodes == std_opcodes
 
@@ -81,7 +81,7 @@ def test_chunk_mode_opcodes(binary_streams):
     # Chunk size 4 bytes
     matcher = StreamSequenceMatcher(a_stream, b_stream, chunk_size=4)
 
-    opcodes = matcher.get_opcodes()
+    opcodes = list(matcher.get_opcodes())
 
     # A: [AAAA][CCCC] (0-4, 4-8)
     # B: [BBBB][CCCC][DDDD] (0-4, 4-8, 8-12)
@@ -120,7 +120,7 @@ def test_chunk_mode_refinement():
     # Coarse pass: replace chunk 0 with chunk 0.
     # Refinement: compares "1234567890" vs "12345X7890"
 
-    opcodes = matcher.get_opcodes()
+    opcodes = list(matcher.get_opcodes())
 
     # Expected refined byte-level opcodes:
     # equal 0:5 ("12345")
