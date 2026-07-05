@@ -1,5 +1,7 @@
 # distutils: language=c
 # cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
 #
 # based off https://github.com/gritzko/myers-diff/blob/master/dmp_diff.hpp
 # original site: https://github.com/gritzko/myers-diff/
@@ -12,6 +14,8 @@
 # in loops and recursive calls.
 
 from collections.abc import Iterator
+from cpython cimport array
+import array as pyarray
 
 
 cdef class MyersSequenceMatcher:
@@ -49,39 +53,39 @@ cdef class MyersSequenceMatcher:
 
         diffs = self._diff_main(self.a, 0, len(self.a), self.b, 0, len(self.b))
 
-        opcodes_list = []
-        i, j = 0, 0
+        # Build opcodes and merge adjacent delete+insert → replace in a single pass.
+        cdef list opcodes_list = []
+        cdef int i = 0, j = 0, chunk_len
+        cdef object chunk, pending_delete
 
-        # This part remains in Python as it deals with Python objects (tuples, lists)
-        # and is not the main performance bottleneck.
+        pending_delete = None
         for op, chunk in diffs:
             chunk_len = len(chunk)
             if op == 'equal':
+                if pending_delete is not None:
+                    opcodes_list.append(pending_delete)
+                    pending_delete = None
                 opcodes_list.append(('equal', i, i + chunk_len, j, j + chunk_len))
                 i += chunk_len
                 j += chunk_len
             elif op == 'delete':
-                opcodes_list.append(('delete', i, i + chunk_len, j, j))
+                if pending_delete is not None:
+                    opcodes_list.append(pending_delete)
+                pending_delete = ('delete', i, i + chunk_len, j, j)
                 i += chunk_len
             elif op == 'insert':
-                opcodes_list.append(('insert', i, i, j, j + chunk_len))
+                if pending_delete is not None:
+                    opcodes_list.append(('replace', pending_delete[1], pending_delete[2], j, j + chunk_len))
+                    pending_delete = None
+                else:
+                    opcodes_list.append(('insert', i, i, j, j + chunk_len))
                 j += chunk_len
 
-        merged_opcodes = []
-        idx = 0
-        while idx < len(opcodes_list):
-            current_op = opcodes_list[idx]
-            if idx + 1 < len(opcodes_list):
-                next_op = opcodes_list[idx+1]
-                if current_op[0] == 'delete' and next_op[0] == 'insert':
-                    merged_opcodes.append(('replace', current_op[1], current_op[2], next_op[3], next_op[4]))
-                    idx += 2
-                    continue
-            merged_opcodes.append(current_op)
-            idx += 1
+        if pending_delete is not None:
+            opcodes_list.append(pending_delete)
 
-        self.opcodes = merged_opcodes
-        for op in merged_opcodes:
+        self.opcodes = opcodes_list
+        for op in opcodes_list:
             yield op
 
     # --- Core algorithm methods defined as `cdef` for C-level speed ---
@@ -116,11 +120,17 @@ cdef class MyersSequenceMatcher:
 
         cdef list diffs = self._diff_compute(a, a_off, a_len, b, b_off, b_len)
 
-        if common_prefix:
-            diffs.insert(0, ('equal', common_prefix))
-        if common_suffix:
-            diffs.append(('equal', common_suffix))
-
+        # Assemble result without O(n) list shift from insert(0, ...).
+        # list.extend() uses a single bulk memcpy; prepend via concatenation does not.
+        cdef list result
+        if common_prefix or common_suffix:
+            result = []
+            if common_prefix:
+                result.append(('equal', common_prefix))
+            result.extend(diffs)
+            if common_suffix:
+                result.append(('equal', common_suffix))
+            return result
         return diffs
 
     cdef list _diff_compute(self, list a, int a_off, int a_len, list b, int b_off, int b_len):
@@ -129,26 +139,26 @@ cdef class MyersSequenceMatcher:
         if not b_len:
             return [('delete', a[a_off : a_off + a_len])]
 
-        # This heuristic part is simplified for the Cython port, as the main
-        # performance gain comes from the bisect algorithm.
-        if min(a_len, b_len) == 1:
-            return [('delete', a[a_off:a_off+a_len]), ('insert', b[b_off:b_off+b_len])]
-
         return self._diff_bisect(a, a_off, a_len, b, b_off, b_len)
 
     cdef list _diff_bisect(self, list a, int a_off, int a_len, list b, int b_off, int b_len):
         cdef int max_d, v_offset, v_len, delta, d, k1, k1_offset, x1, y1
         cdef int k2, k2_offset, x2, y2
         cdef bint front
+        cdef int[:] v1, v2
+        cdef array.array _v1_arr, _v2_arr
 
         max_d = (a_len + b_len + 1) // 2
         v_offset = max_d
         v_len = 2 * max_d
 
-        # Using Python lists is fine here as the logic inside the C loops is fast.
-        # For max performance, C arrays (`int*`) could be used with `malloc`.
-        v1 = [-1] * v_len
-        v2 = [-1] * v_len
+        # Initialize V-arrays with -1 sentinel ("not yet reached") using raw bytes:
+        # b'\xff\xff\xff\xff' = 0xFFFFFFFF = -1 as signed 32-bit int (2's complement).
+        # This avoids creating a Python list of ints before copying to the C array.
+        _v1_arr = pyarray.array('i', b'\xff\xff\xff\xff' * v_len)
+        _v2_arr = pyarray.array('i', b'\xff\xff\xff\xff' * v_len)
+        v1 = _v1_arr
+        v2 = _v2_arr
         v1[v_offset + 1] = 0
         v2[v_offset + 1] = 0
 

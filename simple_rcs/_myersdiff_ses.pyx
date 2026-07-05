@@ -1,5 +1,7 @@
 # distutils: language=c
 # cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
 #
 # based off https://www.ioplex.com/~miallen/libmba/dl/src/diff.c
 # License: MIT
@@ -10,10 +12,9 @@
 # This is a Cython-optimized version of myers
 # It adds C-level type declarations for significant performance improvement.
 
-import os
-from collections import namedtuple
 from collections.abc import Iterator
-from typing import BinaryIO
+from cpython cimport array
+import array as pyarray
 
 
 # Using Cython's cdef to define C-level constants and structs
@@ -21,10 +22,9 @@ cdef int DIFF_DELETE = 1
 cdef int DIFF_INSERT = 2
 cdef int DIFF_MATCH = 3
 
-# namedtuples are Python objects, so we keep them as they are.
-# For extreme optimization, one could use C-structs.
-DiffEdit = namedtuple('DiffEdit', ['op', 'off', 'len'])
-MiddleSnake = namedtuple('MiddleSnake', ['x', 'y', 'u', 'v'])
+# Plain tuples replace namedtuples for allocation-free access:
+#   DiffEdit:   (op, off, length) — indexed [0], [1], [2]
+#   MiddleSnake:(x, y, u, v)      — indexed [0], [1], [2], [3]
 
 # cdef class for faster instance variable access
 cdef class MyersSequenceMatcher:
@@ -65,29 +65,31 @@ cdef class MyersSequenceMatcher:
 
     def _calculate_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:
         cdef list ses_results = []
-        cdef list sn_output = [0]
+        cdef list si_ref = [0]
 
         self._diff(
             self.a, 0, len(self.a),
             self.b, 0, len(self.b),
-            ses_results, sn_output,
+            ses_results, si_ref,
         )
 
-        cdef int a_idx, b_idx, i, j, ai, bj, size
+        cdef int a_idx, b_idx, i, j, ai, bj, size, edit_op, edit_len
         cdef str tag
         cdef object edit
         matching_blocks = []
         a_idx, b_idx = 0, 0
         for edit in ses_results:
-            if edit.op == DIFF_MATCH:
-                if edit.len > 0:
-                    matching_blocks.append((a_idx, b_idx, edit.len))
-                a_idx += edit.len
-                b_idx += edit.len
-            elif edit.op == DIFF_DELETE:
-                a_idx += edit.len
-            elif edit.op == DIFF_INSERT:
-                b_idx += edit.len
+            edit_op = edit[0]
+            edit_len = edit[2]
+            if edit_op == DIFF_MATCH:
+                if edit_len > 0:
+                    matching_blocks.append((a_idx, b_idx, edit_len))
+                a_idx += edit_len
+                b_idx += edit_len
+            elif edit_op == DIFF_DELETE:
+                a_idx += edit_len
+            elif edit_op == DIFF_INSERT:
+                b_idx += edit_len
 
         matching_blocks.append((len(self.a), len(self.b), 0))
 
@@ -108,29 +110,24 @@ cdef class MyersSequenceMatcher:
             if size:
                 yield ('equal', ai, i, bj, j)
 
-    cdef inline void _setv(self, list buf, int k, int r, int val):
+    cdef inline void _setv(self, int[:] buf, int k, int r, int val):
         cdef int j
         if k <= 0:
             j = -k * 4 + r
         else:
             j = k * 4 + (r - 2)
-
-        if j >= len(buf):
-            buf.extend([0] * (j - len(buf) + 1))
         buf[j] = val
 
-    cdef inline int _v(self, list buf, int k, int r):
+    cdef inline int _v(self, int[:] buf, int k, int r):
+        # boundscheck=False: buf is pre-allocated to cover all valid (k, r) pairs.
         cdef int j
         if k <= 0:
             j = -k * 4 + r
         else:
             j = k * 4 + (r - 2)
-
-        if j >= len(buf):
-            return 0
         return buf[j]
 
-    cdef tuple _find_middle_snake(self, list a, int aoff, int n, list b, int boff, int m, list buf):
+    cdef tuple _find_middle_snake(self, list a, int aoff, int n, list b, int boff, int m, int[:] buf):
         cdef int delta, odd, mid, d, k, x, y, ms_x, ms_y, k_rev, kr, ms_u, ms_v
         delta = n - m
         odd = delta & 1
@@ -156,7 +153,7 @@ cdef class MyersSequenceMatcher:
                 self._setv(buf, k, 0, x)
 
                 if odd and (delta - (d - 1)) <= k <= (delta + (d - 1)) and x >= self._v(buf, k, 1):
-                    return 2 * d - 1, MiddleSnake(ms_x, ms_y, x, y)
+                    return 2 * d - 1, (ms_x, ms_y, x, y)
 
             for k_rev in range(-d, d + 1, 2):
                 kr = delta + k_rev
@@ -173,7 +170,7 @@ cdef class MyersSequenceMatcher:
                 self._setv(buf, kr, 1, x)
 
                 if not odd and -d <= kr <= d and x <= self._v(buf, kr, 0):
-                    return 2 * d, MiddleSnake(x, y, ms_u, ms_v)
+                    return 2 * d, (x, y, ms_u, ms_v)
         return -1, None
 
     cdef inline void _edit(self, list ses_results, list si_ref, int op, int off, int length):
@@ -183,14 +180,14 @@ cdef class MyersSequenceMatcher:
             return
 
         si = si_ref[0]
-        if si > 0 and ses_results[si - 1].op == op and ses_results[si - 1].off + ses_results[si - 1].len == off:
+        if si > 0 and ses_results[si - 1][0] == op and ses_results[si - 1][1] + ses_results[si - 1][2] == off:
             prev = ses_results[si - 1]
-            ses_results[si - 1] = prev._replace(len=prev.len + length)
+            ses_results[si - 1] = (op, prev[1], prev[2] + length)
         else:
-            ses_results.append(DiffEdit(op, off, length))
+            ses_results.append((op, off, length))
             si_ref[0] += 1
 
-    cdef int _ses(self, list a, int aoff, int n, list b, int boff, int m, list ses_results, list si_ref, list buf):
+    cdef int _ses(self, list a, int aoff, int n, list b, int boff, int m, list ses_results, list si_ref, int[:] buf):
         cdef int d, match_len
         cdef object ms
         if n == 0:
@@ -202,14 +199,14 @@ cdef class MyersSequenceMatcher:
 
         d, ms = self._find_middle_snake(a, aoff, n, b, boff, m, buf)
         if d == -1: return -1
-        if d > 1 or (ms.x != ms.u and ms.y != ms.v):
-            if self._ses(a, aoff, ms.x, b, boff, ms.y, ses_results, si_ref, buf) == -1:
+        if d > 1 or (ms[0] != ms[2] and ms[1] != ms[3]):
+            if self._ses(a, aoff, ms[0], b, boff, ms[1], ses_results, si_ref, buf) == -1:
                 return -1
 
-            match_len = ms.u - ms.x
-            self._edit(ses_results, si_ref, DIFF_MATCH, aoff + ms.x, match_len)
+            match_len = ms[2] - ms[0]
+            self._edit(ses_results, si_ref, DIFF_MATCH, aoff + ms[0], match_len)
 
-            if self._ses(a, aoff + ms.u, n - ms.u, b, boff + ms.v, m - ms.v, ses_results, si_ref, buf) == -1:
+            if self._ses(a, aoff + ms[2], n - ms[2], b, boff + ms[3], m - ms[3], ses_results, si_ref, buf) == -1:
                 return -1
         elif m > n:
             self._edit(ses_results, si_ref, DIFF_INSERT, boff, 1)
@@ -219,9 +216,23 @@ cdef class MyersSequenceMatcher:
             self._edit(ses_results, si_ref, DIFF_MATCH, aoff + 1, m)
         return d
 
-    cdef int _diff(self, list a, int aoff, int n, list b, int boff, int m, list ses_results, list sn_output):
-        cdef list buf = []
-        cdef list si_ref = [0]
+    cdef int _diff(self, list a, int aoff, int n, list b, int boff, int m, list ses_results, list si_ref):
+        # Pre-allocate the V-array buffer for all recursive _ses/_find_middle_snake calls.
+        #
+        # Index encoding: k<=0 → j = |k|*4+r, k>0 → j = k*4+(r-2), r∈{0,1}
+        #
+        # Forward pass:  max |k| = mid ≈ (n+m)/2  → j_max ≈ 2*(n+m)
+        # Backward pass: max |kr| = |delta| + mid ≤ 3/2*max(n,m)
+        #                → j_max ≈ 6*max(n,m) for asymmetric inputs
+        #
+        # Safe upper bound: max(4*(n+m), 6*max(n,m)) + margin
+        cdef int n_plus_m = n + m
+        cdef int larger = n if n >= m else m
+        cdef int fwd_bound = 4 * n_plus_m
+        cdef int rev_bound = 6 * larger
+        cdef int buf_size = (fwd_bound if fwd_bound >= rev_bound else rev_bound) + 10
+        cdef array.array buf_arr = pyarray.array('i', b'\x00' * (buf_size * 4))
+        cdef int[:] buf = buf_arr
         cdef int x, x_n, x_m, d, suffix_len
 
         x = 0
@@ -240,8 +251,5 @@ cdef class MyersSequenceMatcher:
 
         suffix_len = n - x_n
         self._edit(ses_results, si_ref, DIFF_MATCH, aoff + x_n, suffix_len)
-
-        if sn_output is not None:
-            sn_output[0] = si_ref[0]
 
         return d
