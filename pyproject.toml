@@ -54,6 +54,12 @@ ignore = [
     "COM812", # trailing comma — conflicts with ruff formatter
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",  # assert — required in pytest
+    "T201",  # print — intentional in benchmarks and compat tests
+]
+
 [tool.hatch.build]
 dev-mode-dirs = ["simple_rcs"]
 dev-mode-exact = true
