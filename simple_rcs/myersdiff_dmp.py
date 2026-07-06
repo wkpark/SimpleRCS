@@ -68,15 +68,15 @@ class MyersSequenceMatcher:
         # A more advanced version could merge adjacent delete/insert into replace.
         for op, chunk in diffs:
             chunk_len = len(chunk)
-            if op == 'equal':
-                opcodes_list.append(('equal', i, i + chunk_len, j, j + chunk_len))
+            if op == "equal":
+                opcodes_list.append(("equal", i, i + chunk_len, j, j + chunk_len))
                 i += chunk_len
                 j += chunk_len
-            elif op == 'delete':
-                opcodes_list.append(('delete', i, i + chunk_len, j, j))
+            elif op == "delete":
+                opcodes_list.append(("delete", i, i + chunk_len, j, j))
                 i += chunk_len
-            elif op == 'insert':
-                opcodes_list.append(('insert', i, i, j, j + chunk_len))
+            elif op == "insert":
+                opcodes_list.append(("insert", i, i, j, j + chunk_len))
                 j += chunk_len
 
         # Merge adjacent delete/insert into a single replace
@@ -85,9 +85,9 @@ class MyersSequenceMatcher:
         while idx < len(opcodes_list):
             current_op = opcodes_list[idx]
             if idx + 1 < len(opcodes_list):
-                next_op = opcodes_list[idx+1]
-                if current_op[0] == 'delete' and next_op[0] == 'insert':
-                    merged_opcodes.append(('replace', current_op[1], current_op[2], next_op[3], next_op[4]))
+                next_op = opcodes_list[idx + 1]
+                if current_op[0] == "delete" and next_op[0] == "insert":
+                    merged_opcodes.append(("replace", current_op[1], current_op[2], next_op[3], next_op[4]))
                     idx += 2
                     continue
             merged_opcodes.append(current_op)
@@ -103,9 +103,9 @@ class MyersSequenceMatcher:
         Find the differences between two sub-sequences defined by offsets and lengths.
         """
         if a_len == 0:
-            return [('insert', b[b_off : b_off + b_len])] if b_len > 0 else []
+            return [("insert", b[b_off : b_off + b_len])] if b_len > 0 else []
         if b_len == 0:
-            return [('delete', a[a_off : a_off + a_len])] if a_len > 0 else []
+            return [("delete", a[a_off : a_off + a_len])] if a_len > 0 else []
 
         # Check for equality
         is_equal = a_len == b_len
@@ -115,10 +115,10 @@ class MyersSequenceMatcher:
                     is_equal = False
                     break
             if is_equal:
-                return [('equal', a[a_off : a_off + a_len])]
+                return [("equal", a[a_off : a_off + a_len])]
 
         # Trim off common prefix
-        common_len = self._diff_commonPrefix(a, a_off, a_len, b, b_off, b_len)
+        common_len = self._diff_common_prefix(a, a_off, a_len, b, b_off, b_len)
         common_prefix = a[a_off : a_off + common_len]
         a_off += common_len
         a_len -= common_len
@@ -126,7 +126,7 @@ class MyersSequenceMatcher:
         b_len -= common_len
 
         # Trim off common suffix
-        common_len_suffix = self._diff_commonSuffix(a, a_off, a_len, b, b_off, b_len)
+        common_len_suffix = self._diff_common_suffix(a, a_off, a_len, b, b_off, b_len)
         common_suffix = a[a_off + a_len - common_len_suffix : a_off + a_len]
         a_len -= common_len_suffix
         b_len -= common_len_suffix
@@ -136,9 +136,9 @@ class MyersSequenceMatcher:
 
         # Restore the prefix and suffix
         if common_prefix:
-            diffs.insert(0, ('equal', common_prefix))
+            diffs.insert(0, ("equal", common_prefix))
         if common_suffix:
-            diffs.append(('equal', common_suffix))
+            diffs.append(("equal", common_suffix))
 
         return diffs
 
@@ -147,12 +147,13 @@ class MyersSequenceMatcher:
         Find the differences between two sub-sequences. Assumes no common prefix or suffix.
         """
         if not a_len:
-            return [('insert', b[b_off : b_off + b_len])]
+            return [("insert", b[b_off : b_off + b_len])]
         if not b_len:
-            return [('delete', a[a_off : a_off + a_len])]
+            return [("delete", a[a_off : a_off + a_len])]
 
-        long_seq, long_off, long_len, short_seq, short_off, short_len = \
+        long_seq, long_off, long_len, short_seq, short_off, short_len = (
             (a, a_off, a_len, b, b_off, b_len) if a_len > b_len else (b, b_off, b_len, a, a_off, a_len)
+        )
 
         # Find if short sequence is a substring of long one
         for i in range(long_len - short_len + 1):
@@ -162,11 +163,11 @@ class MyersSequenceMatcher:
                     is_match = False
                     break
             if is_match:
-                op = 'delete' if a_len > b_len else 'insert'
+                op = "delete" if a_len > b_len else "insert"
                 diffs = []
                 if i > 0:
                     diffs.append((op, long_seq[long_off : long_off + i]))
-                diffs.append(('equal', short_seq[short_off : short_off + short_len]))
+                diffs.append(("equal", short_seq[short_off : short_off + short_len]))
                 if i + short_len < long_len:
                     diffs.append((op, long_seq[long_off + i + short_len : long_off + long_len]))
                 return diffs
@@ -174,7 +175,7 @@ class MyersSequenceMatcher:
         if min(a_len, b_len) == 1:
             # After the common prefix/suffix and substring checks, if one
             # sequence is of length 1, the diff is a simple delete/insert.
-            return [('delete', a[a_off:a_off+a_len]), ('insert', b[b_off:b_off+b_len])]
+            return [("delete", a[a_off : a_off + a_len]), ("insert", b[b_off : b_off + b_len])]
 
         return self._diff_bisect(a, a_off, a_len, b, b_off, b_len)
 
@@ -190,7 +191,7 @@ class MyersSequenceMatcher:
         v1[v_offset + 1] = 0
         v2[v_offset + 1] = 0
         delta = a_len - b_len
-        front = (delta % 2 != 0)
+        front = delta % 2 != 0
 
         for d in range(max_d):
             # Forward pass
@@ -210,7 +211,7 @@ class MyersSequenceMatcher:
                     if 0 <= k2_offset < v_len and v2[k2_offset] != -1:
                         x2 = a_len - v2[k2_offset]
                         if x1 >= x2:
-                            return self._diff_bisectSplit(a, a_off, a_len, b, b_off, b_len, x1, y1)
+                            return self._diff_bisect_split(a, a_off, a_len, b, b_off, b_len, x1, y1)
 
             # Backward pass
             for k2 in range(-d, d + 1, 2):
@@ -231,17 +232,17 @@ class MyersSequenceMatcher:
                         y1 = v_offset + x1 - k1_offset
                         x2 = a_len - x2
                         if x1 >= x2:
-                            return self._diff_bisectSplit(a, a_off, a_len, b, b_off, b_len, x1, y1)
+                            return self._diff_bisect_split(a, a_off, a_len, b, b_off, b_len, x1, y1)
 
-        return [('delete', a[a_off:a_off+a_len]), ('insert', b[b_off:b_off+b_len])]
+        return [("delete", a[a_off : a_off + a_len]), ("insert", b[b_off : b_off + b_len])]
 
-    def _diff_bisectSplit(self, a, a_off, a_len, b, b_off, b_len, x, y):
+    def _diff_bisect_split(self, a, a_off, a_len, b, b_off, b_len, x, y):
         """Given the location of the 'middle snake', split the diff and recurse."""
         diffs = self._diff_main(a, a_off, x, b, b_off, y)
         diffs.extend(self._diff_main(a, a_off + x, a_len - x, b, b_off + y, b_len - y))
         return diffs
 
-    def _diff_commonPrefix(self, a, a_off, a_len, b, b_off, b_len):
+    def _diff_common_prefix(self, a, a_off, a_len, b, b_off, b_len):
         """Determine the common prefix of two sub-sequences."""
         n = min(a_len, b_len)
         for i in range(n):
@@ -249,11 +250,10 @@ class MyersSequenceMatcher:
                 return i
         return n
 
-    def _diff_commonSuffix(self, a, a_off, a_len, b, b_off, b_len):
+    def _diff_common_suffix(self, a, a_off, a_len, b, b_off, b_len):
         """Determine the common suffix of two sub-sequences."""
         n = min(a_len, b_len)
         for i in range(1, n + 1):
             if a[a_off + a_len - i] != b[b_off + b_len - i]:
                 return i - 1
         return n
-

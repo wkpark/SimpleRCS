@@ -46,6 +46,14 @@ select = [
     "T20"  # flake8-print
 ]
 
+ignore = [
+    "ANN",   # type annotations — internal algorithm code
+    "N806",  # uppercase variable in function — intentional constants (CHUNK, WINDOW, etc.)
+    "S603",  # subprocess call — unavoidable in GPG wrapper
+    "C901",  # mccabe complexity — inherent in diff algorithm implementations
+    "COM812", # trailing comma — conflicts with ruff formatter
+]
+
 [tool.hatch.build]
 dev-mode-dirs = ["simple_rcs"]
 dev-mode-exact = true

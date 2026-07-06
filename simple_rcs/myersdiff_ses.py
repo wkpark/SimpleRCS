@@ -9,16 +9,15 @@ from collections import namedtuple
 from collections.abc import Iterator
 from typing import BinaryIO
 
-
 # Operation constants
 DIFF_DELETE = 1
 DIFF_INSERT = 2
 DIFF_MATCH = 3
 
 # Internal representation of an edit
-DiffEdit = namedtuple('DiffEdit', ['op', 'off', 'len'])
+DiffEdit = namedtuple("DiffEdit", ["op", "off", "len"])
 
-MiddleSnake = namedtuple('MiddleSnake', ['x', 'y', 'u', 'v'])
+MiddleSnake = namedtuple("MiddleSnake", ["x", "y", "u", "v"])
 
 
 class MyersSequenceMatcher:
@@ -85,45 +84,50 @@ class MyersSequenceMatcher:
 
         # Start the diff process which populates ses_results
         self._diff(
-            a=self.a, aoff=0, n=len(self.a),
-            b=self.b, boff=0, m=len(self.b),
-            ses_results=ses_results, sn_output=sn_output,
+            a=self.a,
+            aoff=0,
+            n=len(self.a),
+            b=self.b,
+            boff=0,
+            m=len(self.b),
+            ses_results=ses_results,
+            sn_output=sn_output,
         )
 
         # --- Step 1: Convert SES to matching_blocks ---
         matching_blocks = []
-        a_pos, b_pos = 0, 0
+        _a_pos, b_pos = 0, 0
         for edit in ses_results:
             if edit.op == DIFF_MATCH:
                 if edit.len > 0:
                     # The SES 'off' is relative to 'a', but we track 'b' position manually
                     matching_blocks.append((edit.off, b_pos, edit.len))
-                a_pos = edit.off + edit.len
+                _a_pos = edit.off + edit.len
                 b_pos += edit.len
             elif edit.op == DIFF_INSERT:
                 b_pos += edit.len
             elif edit.op == DIFF_DELETE:
-                a_pos = edit.off + edit.len
+                _a_pos = edit.off + edit.len
 
         matching_blocks.append((len(self.a), len(self.b), 0))
 
         # --- Step 2: Generate opcodes from matching_blocks (standard difflib logic) ---
         i, j = 0, 0
         for ai, bj, size in matching_blocks:
-            tag = ''
+            tag = ""
             if i < ai and j < bj:
-                tag = 'replace'
+                tag = "replace"
             elif i < ai:
-                tag = 'delete'
+                tag = "delete"
             elif j < bj:
-                tag = 'insert'
+                tag = "insert"
 
             if tag:
                 yield (tag, i, ai, j, bj)
 
             i, j = ai + size, bj + size
             if size:
-                yield ('equal', ai, i, bj, j)
+                yield ("equal", ai, i, bj, j)
 
     # --- Core algorithm adapted from myers_x.py ---
 
@@ -217,7 +221,8 @@ class MyersSequenceMatcher:
             return n
 
         d, ms = self._find_middle_snake(a, aoff, n, b, boff, m, buf)
-        if d == -1: return -1
+        if d == -1:
+            return -1
         if d > 1 or (ms.x != ms.u and ms.y != ms.v):
             if self._ses(a, aoff, ms.x, b, boff, ms.y, ses_results, si_ref, buf) == -1:
                 return -1
@@ -238,7 +243,7 @@ class MyersSequenceMatcher:
     def _diff(self, a, aoff, n, b, boff, m, ses_results, sn_output):
         """Main entry point for the diff algorithm."""
         buf = {}
-        si_ref = [0] # Use a list to simulate a mutable integer reference
+        si_ref = [0]  # Use a list to simulate a mutable integer reference
 
         # 1. Handle common prefix
         x = 0
@@ -301,11 +306,13 @@ class MyersStreamSequenceMatcher:
                 break
 
             offset_list.append(start_offset)
-            content_to_hash = chunk if self.chunk_size else chunk.rstrip(b'\r\n')
+            content_to_hash = chunk if self.chunk_size else chunk.rstrip(b"\r\n")
             hash_list.append(hash(content_to_hash))
         return hash_list
 
-    def _get_byte_offset(self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:
+    def _get_byte_offset(
+        self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None
+    ) -> int:
         """Gets the byte offset for a given chunk/line index."""
         if idx < len(offsets):
             return offsets[idx]
@@ -337,9 +344,14 @@ class MyersStreamSequenceMatcher:
         sn_output = [0]
 
         self._diff(
-            a=self.a, aoff=0, n=len(self.a),
-            b=self.b, boff=0, m=len(self.b),
-            ses_results=ses_results, sn_output=sn_output
+            a=self.a,
+            aoff=0,
+            n=len(self.a),
+            b=self.b,
+            boff=0,
+            m=len(self.b),
+            ses_results=ses_results,
+            sn_output=sn_output,
         )
 
         matching_blocks = []
@@ -361,13 +373,13 @@ class MyersStreamSequenceMatcher:
 
         i, j = 0, 0
         for ai, bj, size in matching_blocks:
-            tag = ''
+            tag = ""
             if i < ai and j < bj:
-                tag = 'replace'
+                tag = "replace"
             elif i < ai:
-                tag = 'delete'
+                tag = "delete"
             elif j < bj:
-                tag = 'insert'
+                tag = "insert"
 
             if tag:
                 if self.chunk_size is None:
@@ -382,22 +394,26 @@ class MyersStreamSequenceMatcher:
             i, j = ai + size, bj + size
             if size:
                 if self.chunk_size is None:
-                    yield ('equal', ai, i, bj, j)
+                    yield ("equal", ai, i, bj, j)
                 else:
                     a_start = self._get_byte_offset(self.a_offsets, ai)
                     a_end = self._get_byte_offset(self.a_offsets, i, is_end=True, stream=self.a_stream)
                     b_start = self._get_byte_offset(self.b_offsets, bj)
                     b_end = self._get_byte_offset(self.b_offsets, j, is_end=True, stream=self.b_stream)
-                    yield ('equal', a_start, a_end, b_start, b_end)
+                    yield ("equal", a_start, a_end, b_start, b_end)
 
     def _setv(self, buf, k, r, val):
-        if k <= 0: j = -k * 4 + r
-        else: j = k * 4 + (r - 2)
+        if k <= 0:
+            j = -k * 4 + r
+        else:
+            j = k * 4 + (r - 2)
         buf[j] = val
 
     def _v(self, buf, k, r):
-        if k <= 0: j = -k * 4 + r
-        else: j = k * 4 + (r - 2)
+        if k <= 0:
+            j = -k * 4 + r
+        else:
+            j = k * 4 + (r - 2)
         return buf.get(j, 0)
 
     def _find_middle_snake(self, a, aoff, n, b, boff, m, buf):
@@ -438,7 +454,8 @@ class MyersStreamSequenceMatcher:
         return -1, None
 
     def _edit(self, ses_results, si_ref, op, off, length):
-        if length == 0: return
+        if length == 0:
+            return
         si = si_ref[0]
         if si > 0 and ses_results[si - 1].op == op and ses_results[si - 1].off + ses_results[si - 1].len == off:
             prev = ses_results[si - 1]
@@ -455,12 +472,15 @@ class MyersStreamSequenceMatcher:
             self._edit(ses_results, si_ref, DIFF_DELETE, aoff, n)
             return n
         d, ms = self._find_middle_snake(a, aoff, n, b, boff, m, buf)
-        if d == -1: return -1
+        if d == -1:
+            return -1
         if d > 1 or (ms.x != ms.u and ms.y != ms.v):
-            if self._ses(a, aoff, ms.x, b, boff, ms.y, ses_results, si_ref, buf) == -1: return -1
+            if self._ses(a, aoff, ms.x, b, boff, ms.y, ses_results, si_ref, buf) == -1:
+                return -1
             match_len = ms.u - ms.x
             self._edit(ses_results, si_ref, DIFF_MATCH, aoff + ms.x, match_len)
-            if self._ses(a, aoff + ms.u, n - ms.u, b, boff + ms.v, m - ms.v, ses_results, si_ref, buf) == -1: return -1
+            if self._ses(a, aoff + ms.u, n - ms.u, b, boff + ms.v, m - ms.v, ses_results, si_ref, buf) == -1:
+                return -1
         elif m > n:
             self._edit(ses_results, si_ref, DIFF_INSERT, boff, 1)
             self._edit(ses_results, si_ref, DIFF_MATCH, aoff, n)
@@ -481,8 +501,10 @@ class MyersStreamSequenceMatcher:
             x_n -= 1
             x_m -= 1
         d = self._ses(a, aoff + x, x_n - x, b, boff + x, x_m - x, ses_results, si_ref, buf)
-        if d == -1: return -1
+        if d == -1:
+            return -1
         suffix_len = n - x_n
         self._edit(ses_results, si_ref, DIFF_MATCH, aoff + x_n, suffix_len)
-        if sn_output is not None: sn_output[0] = si_ref[0]
+        if sn_output is not None:
+            sn_output[0] = si_ref[0]
         return d

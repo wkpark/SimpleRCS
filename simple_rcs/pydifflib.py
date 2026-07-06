@@ -16,7 +16,8 @@ class StreamSequenceMatcher:
     making it suitable for large files with small chunks.
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         a_stream: BinaryIO,
         b_stream: BinaryIO,
         chunk_size: int | None = None,
@@ -62,8 +63,8 @@ class StreamSequenceMatcher:
             offset_list.append(start_offset)
 
             content_to_hash = chunk
-            if not self.chunk_size: # Line-based mode
-                content_to_hash = chunk.rstrip(b'\r\n')
+            if not self.chunk_size:  # Line-based mode
+                content_to_hash = chunk.rstrip(b"\r\n")
 
             chunk_hash = zlib.crc32(content_to_hash) & 0xFFFFFFFF
             hash_list.append(chunk_hash)
@@ -120,7 +121,7 @@ class StreamSequenceMatcher:
             # For large repetitive files, checking thousands of candidates kills performance.
 
             check_count = 0
-            max_checks = 100 # Heuristic limit
+            max_checks = 100  # Heuristic limit
 
             for cand_a_idx in candidates:
                 if cand_a_idx < a_curr:
@@ -131,7 +132,7 @@ class StreamSequenceMatcher:
                     break
 
                 # Found a potential start. Extend match.
-                current_len = 0
+                _current_len = 0
                 # Optimization: We only need to extend if this could beat best_match_len
                 # But for strict greedy (first match), we just take it and extend?
                 # Let's try to find the *longest* match among candidates to be safe,
@@ -143,9 +144,11 @@ class StreamSequenceMatcher:
 
                 # Check if it matches at least one block (it does, by hash map)
                 k = 0
-                while (b_curr + k < len_b and cand_a_idx + k < len_a and
-                       self.b_hashes[b_curr + k] == self.a_hashes[cand_a_idx + k]):
-
+                while (
+                    b_curr + k < len_b
+                    and cand_a_idx + k < len_a
+                    and self.b_hashes[b_curr + k] == self.a_hashes[cand_a_idx + k]
+                ):
                     k += 1
 
                 if k > best_match_len:
@@ -173,11 +176,12 @@ class StreamSequenceMatcher:
                 if a_curr < best_match_a_start:
                     # We skipped some parts of A to find this match.
                     # This implies a DELETE of a[a_curr : best_match_a_start]
-                    yield from self._emit_opcodes('delete', a_curr, best_match_a_start, b_curr, b_curr)
+                    yield from self._emit_opcodes("delete", a_curr, best_match_a_start, b_curr, b_curr)
 
                 # Emit the match
-                yield from self._emit_opcodes('equal', best_match_a_start, best_match_a_start + best_match_len,
-                                             b_curr, b_curr + best_match_len)
+                yield from self._emit_opcodes(
+                    "equal", best_match_a_start, best_match_a_start + best_match_len, b_curr, b_curr + best_match_len
+                )
 
                 a_curr = best_match_a_start + best_match_len
                 b_curr += best_match_len
@@ -215,10 +219,10 @@ class StreamSequenceMatcher:
 
                     # If both have gaps, it's a REPLACE
                     if a_curr < sync_a_idx:
-                        yield from self._emit_opcodes('replace', a_curr, sync_a_idx, b_curr, sync_b_idx)
+                        yield from self._emit_opcodes("replace", a_curr, sync_a_idx, b_curr, sync_b_idx)
                     else:
                         # Only gap in B -> INSERT
-                        yield from self._emit_opcodes('insert', a_curr, a_curr, b_curr, sync_b_idx)
+                        yield from self._emit_opcodes("insert", a_curr, a_curr, b_curr, sync_b_idx)
 
                     a_curr = sync_a_idx
                     b_curr = sync_b_idx
@@ -226,9 +230,9 @@ class StreamSequenceMatcher:
                     # No sync point found until EOF.
                     # Everything remaining is REPLACE or INSERT.
                     if a_curr < len_a:
-                        yield from self._emit_opcodes('replace', a_curr, len_a, b_curr, len_b)
+                        yield from self._emit_opcodes("replace", a_curr, len_a, b_curr, len_b)
                     else:
-                        yield from self._emit_opcodes('insert', a_curr, a_curr, b_curr, len_b)
+                        yield from self._emit_opcodes("insert", a_curr, a_curr, b_curr, len_b)
 
                     a_curr = len_a
                     b_curr = len_b
@@ -236,7 +240,7 @@ class StreamSequenceMatcher:
 
         # Trailing deletion
         if a_curr < len_a:
-             yield from self._emit_opcodes('delete', a_curr, len_a, len_b, len_b)
+            yield from self._emit_opcodes("delete", a_curr, len_a, len_b, len_b)
 
     def _emit_opcodes(self, tag: str, i1: int, i2: int, j1: int, j2: int) -> Iterator[tuple[str, int, int, int, int]]:
         """Yields opcodes with correct byte/line mapping and refinement."""
@@ -251,7 +255,7 @@ class StreamSequenceMatcher:
         b_start = self._get_byte_offset(self.b_offsets, j1, stream=self.b_stream)
         b_end = self._get_byte_offset(self.b_offsets, j2, is_end=True, stream=self.b_stream)
 
-        if tag == 'replace':
+        if tag == "replace":
             chunk_a = self._read_range(self.a_stream, self.a_offsets, i1, i2)
             chunk_b = self._read_range(self.b_stream, self.b_offsets, j1, j2)
 
@@ -261,7 +265,8 @@ class StreamSequenceMatcher:
             yield (tag, a_start, a_end, b_start, b_end)
 
     def _refine_greedy(  # noqa: C901
-        self, a: bytes,
+        self,
+        a: bytes,
         b: bytes,
         a_global_offset: int,
         b_global_offset: int,
@@ -277,13 +282,11 @@ class StreamSequenceMatcher:
 
         if len_a == 0:
             if len_b > 0:
-                yield ('insert', a_global_offset, a_global_offset,
-                       b_global_offset, b_global_offset + len_b)
+                yield ("insert", a_global_offset, a_global_offset, b_global_offset, b_global_offset + len_b)
             return
 
         if len_b == 0:
-            yield ('delete', a_global_offset, a_global_offset + len_a,
-                   b_global_offset, b_global_offset)
+            yield ("delete", a_global_offset, a_global_offset + len_a, b_global_offset, b_global_offset)
             return
 
         a_idx = 0
@@ -298,9 +301,13 @@ class StreamSequenceMatcher:
         if len_a <= BASE_MIN_MATCH or len_b <= BASE_MIN_MATCH:
             fine_sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
             for sub_tag, sub_i1, sub_i2, sub_j1, sub_j2 in fine_sm.get_opcodes():
-                yield (sub_tag,
-                       a_global_offset + sub_i1, a_global_offset + sub_i2,
-                       b_global_offset + sub_j1, b_global_offset + sub_j2)
+                yield (
+                    sub_tag,
+                    a_global_offset + sub_i1,
+                    a_global_offset + sub_i2,
+                    b_global_offset + sub_j1,
+                    b_global_offset + sub_j2,
+                )
             return
 
         # Search window limit: Adaptive, capped at 1MB to balance performance and coverage.
@@ -316,7 +323,7 @@ class StreamSequenceMatcher:
             # Create anchor
             anchor_len = min(current_min_match, len_b - b_idx)
 
-            if anchor_len < 8: # Break if anchor is too small to be reliable
+            if anchor_len < 8:  # Break if anchor is too small to be reliable
                 break
             anchor_b = b[b_idx : b_idx + anchor_len]
 
@@ -327,9 +334,13 @@ class StreamSequenceMatcher:
             if match_in_a != -1:
                 # Handle Gap in A (Delete)
                 if a_idx < match_in_a:
-                    yield ('delete',
-                           a_global_offset + a_idx, a_global_offset + match_in_a,
-                           b_global_offset + b_idx, b_global_offset + b_idx)
+                    yield (
+                        "delete",
+                        a_global_offset + a_idx,
+                        a_global_offset + match_in_a,
+                        b_global_offset + b_idx,
+                        b_global_offset + b_idx,
+                    )
 
                 # Extend Match
                 match_len = anchor_len
@@ -338,9 +349,13 @@ class StreamSequenceMatcher:
                 while match_len < max_extend and b[b_idx + match_len] == a[match_in_a + match_len]:
                     match_len += 1
 
-                yield ('equal',
-                       a_global_offset + match_in_a, a_global_offset + match_in_a + match_len,
-                       b_global_offset + b_idx, b_global_offset + b_idx + match_len)
+                yield (
+                    "equal",
+                    a_global_offset + match_in_a,
+                    a_global_offset + match_in_a + match_len,
+                    b_global_offset + b_idx,
+                    b_global_offset + b_idx + match_len,
+                )
 
                 a_idx = match_in_a + match_len
                 b_idx += match_len
@@ -356,9 +371,13 @@ class StreamSequenceMatcher:
 
                 if match_in_b != -1:
                     # Handle Gap in B (Insert)
-                    yield ('insert',
-                           a_global_offset + a_idx, a_global_offset + a_idx,
-                           b_global_offset + b_idx, b_global_offset + match_in_b)
+                    yield (
+                        "insert",
+                        a_global_offset + a_idx,
+                        a_global_offset + a_idx,
+                        b_global_offset + b_idx,
+                        b_global_offset + match_in_b,
+                    )
 
                     # Extend Match
                     match_len = anchor_a_len
@@ -367,9 +386,13 @@ class StreamSequenceMatcher:
                     while match_len < max_extend and b[match_in_b + match_len] == a[a_idx + match_len]:
                         match_len += 1
 
-                    yield ('equal',
-                           a_global_offset + a_idx, a_global_offset + a_idx + match_len,
-                           b_global_offset + match_in_b, b_global_offset + match_in_b + match_len)
+                    yield (
+                        "equal",
+                        a_global_offset + a_idx,
+                        a_global_offset + a_idx + match_len,
+                        b_global_offset + match_in_b,
+                        b_global_offset + match_in_b + match_len,
+                    )
 
                     a_idx += match_len
                     b_idx = match_in_b + match_len
@@ -380,62 +403,87 @@ class StreamSequenceMatcher:
             remaining = min(len_a - a_idx, len_b - b_idx)
             step = min(remaining, max(current_min_match, remaining // 4))
 
-            yield ('replace',
-                   a_global_offset + a_idx, a_global_offset + a_idx + step,
-                   b_global_offset + b_idx, b_global_offset + b_idx + step)
+            yield (
+                "replace",
+                a_global_offset + a_idx,
+                a_global_offset + a_idx + step,
+                b_global_offset + b_idx,
+                b_global_offset + b_idx + step,
+            )
 
             a_idx += step
             b_idx += step
 
         # Handle Remainders
         if a_idx < len_a and b_idx < len_b:
-            yield ('replace',
-                   a_global_offset + a_idx, a_global_offset + len_a,
-                   b_global_offset + b_idx, b_global_offset + len_b)
+            yield (
+                "replace",
+                a_global_offset + a_idx,
+                a_global_offset + len_a,
+                b_global_offset + b_idx,
+                b_global_offset + len_b,
+            )
         elif a_idx < len_a:
-            yield ('delete',
-                   a_global_offset + a_idx, a_global_offset + len_a,
-                   b_global_offset + len_b, b_global_offset + len_b)
+            yield (
+                "delete",
+                a_global_offset + a_idx,
+                a_global_offset + len_a,
+                b_global_offset + len_b,
+                b_global_offset + len_b,
+            )
         elif b_idx < len_b:
-            yield ('insert',
-                   a_global_offset + len_a, a_global_offset + len_a,
-                   b_global_offset + b_idx, b_global_offset + len_b)
+            yield (
+                "insert",
+                a_global_offset + len_a,
+                a_global_offset + len_a,
+                b_global_offset + b_idx,
+                b_global_offset + len_b,
+            )
 
-    def _get_byte_offset(self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:
+    def _get_byte_offset(
+        self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None
+    ) -> int:
         if idx < len(offsets):
             return offsets[idx]
         if stream and (is_end or idx >= len(offsets)):
             stream.seek(0, os.SEEK_END)
             return stream.tell()
-        return 0 # Should handle empty/start cases
+        return 0  # Should handle empty/start cases
 
     def get_matching_blocks(self) -> list[tuple[int, int, int]]:
         # Compatibility wrapper
         blocks = []
         for tag, i1, i2, j1, _j2 in self.get_opcodes():
-            if tag == 'equal':
+            if tag == "equal":
                 blocks.append((i1, j1, i2 - i1))
-        blocks.append((self._get_byte_offset(self.a_offsets, len(self.a_hashes), True, self.a_stream),
-                       self._get_byte_offset(self.b_offsets, len(self.b_hashes), True, self.b_stream), 0))
+        blocks.append(
+            (
+                self._get_byte_offset(self.a_offsets, len(self.a_hashes), True, self.a_stream),
+                self._get_byte_offset(self.b_offsets, len(self.b_hashes), True, self.b_stream),
+                0,
+            )
+        )
         return blocks
 
     def get_lines(self, stream_type: str) -> list[bytes]:
-        stream = self.a_stream if stream_type == 'a' else self.b_stream
+        stream = self.a_stream if stream_type == "a" else self.b_stream
         stream.seek(0)
         return stream.readlines()
 
     def get_lines_from_stream(self, stream_type: str, start_index: int, end_index: int) -> list[bytes]:
-        stream = self.a_stream if stream_type == 'a' else self.b_stream
-        offsets = self.a_offsets if stream_type == 'a' else self.b_offsets
+        stream = self.a_stream if stream_type == "a" else self.b_stream
+        offsets = self.a_offsets if stream_type == "a" else self.b_offsets
         raw = self._read_range(stream, offsets, start_index, end_index)
         if self.chunk_size is None:
             return raw.splitlines(keepends=True)
         return [raw]
 
+
 # --- Rolling Hash Implementation ---
 
 _BASE = 65521
 _OFFS = 1
+
 
 class RollingHashMatcher:
     """
@@ -595,7 +643,7 @@ class RollingHashMatcher:
         first_win = self.b_stream.read(WINDOW)
         if len(first_win) < WINDOW:
             if first_win:
-                yield ('insert', 0, 0, 0, len(first_win))
+                yield ("insert", 0, 0, 0, len(first_win))
             return
 
         # Circular buffer holds exactly WINDOW bytes of the sliding window.
@@ -658,11 +706,10 @@ class RollingHashMatcher:
 
             if best_match_len > 0:
                 if i > pending_insert_start:
-                    yield ('insert', 0, 0, pending_insert_start, i)
+                    yield ("insert", 0, 0, pending_insert_start, i)
                 if best_old_offset != last_old_pos:
-                    yield ('delete', last_old_pos, best_old_offset, i, i)
-                yield ('equal', best_old_offset, best_old_offset + best_match_len,
-                       i, i + best_match_len)
+                    yield ("delete", last_old_pos, best_old_offset, i, i)
+                yield ("equal", best_old_offset, best_old_offset + best_match_len, i, i + best_match_len)
 
                 i += best_match_len
                 pending_insert_start = i
@@ -683,10 +730,11 @@ class RollingHashMatcher:
             i += 1
 
         if pending_insert_start < b_size:
-            yield ('insert', 0, 0, pending_insert_start, b_size)
+            yield ("insert", 0, 0, pending_insert_start, b_size)
 
 
-Match = namedtuple('Match', 'a b size')
+Match = namedtuple("Match", "a b size")
+
 
 class StreamTextSequenceMatcher:
     """
@@ -697,10 +745,11 @@ class StreamTextSequenceMatcher:
     Please see https://github.com/python/cpython/blob/3.14/Lib/difflib.py
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         a_stream: BinaryIO,
         b_stream: BinaryIO,
-        encoding: str = 'utf-8',
+        encoding: str = "utf-8",
         chunk_size: int | None = None,
         isjunk=None,
         autojunk=True,
@@ -762,7 +811,7 @@ class StreamTextSequenceMatcher:
 
             content_to_hash = chunk
             if not self.chunk_size:
-                content_to_hash = chunk.rstrip(b'\r\n')
+                content_to_hash = chunk.rstrip(b"\r\n")
 
             chunk_hash = zlib.crc32(content_to_hash) & 0xFFFFFFFF
             hash_list.append(chunk_hash)
@@ -810,7 +859,7 @@ class StreamTextSequenceMatcher:
             for elt in b2j.keys():
                 if isjunk(elt):
                     junk.add(elt)
-            for elt in junk: # separate loop avoids separate list of keys
+            for elt in junk:  # separate loop avoids separate list of keys
                 del b2j[elt]
 
         # Purge popular elements that are not junk
@@ -821,7 +870,7 @@ class StreamTextSequenceMatcher:
             for elt, idxs in b2j.items():
                 if len(idxs) > ntest:
                     popular.add(elt)
-            for elt in popular: # ditto; as fast for 1% deletion
+            for elt in popular:  # ditto; as fast for 1% deletion
                 del b2j[elt]
 
     def find_longest_match(self, alo=0, ahi=None, blo=0, bhi=None) -> tuple:  # noqa: C901
@@ -850,22 +899,23 @@ class StreamTextSequenceMatcher:
                     continue
                 if j >= bhi:
                     break
-                k = newj2len[j] = j2lenget(j-1, 0) + 1
+                k = newj2len[j] = j2lenget(j - 1, 0) + 1
                 if k > bestsize:
-                    besti, bestj, bestsize = i-k+1, j-k+1, k
+                    besti, bestj, bestsize = i - k + 1, j - k + 1, k
             j2len = newj2len
 
         # Extend the best by non-junk elements on each end.  In particular,
         # "popular" non-junk elements aren't in b2j, which greatly speeds
         # the inner loop above, but also means "the best" match so far
         # doesn't contain any junk *or* popular non-junk elements.
-        while besti > alo and bestj > blo and \
-              not isbjunk(b[bestj-1]) and \
-              a[besti-1] == b[bestj-1]:
-            besti, bestj, bestsize = besti-1, bestj-1, bestsize+1
-        while besti+bestsize < ahi and bestj+bestsize < bhi and \
-              not isbjunk(b[bestj+bestsize]) and \
-              a[besti+bestsize] == b[bestj+bestsize]:
+        while besti > alo and bestj > blo and not isbjunk(b[bestj - 1]) and a[besti - 1] == b[bestj - 1]:
+            besti, bestj, bestsize = besti - 1, bestj - 1, bestsize + 1
+        while (
+            besti + bestsize < ahi
+            and bestj + bestsize < bhi
+            and not isbjunk(b[bestj + bestsize])
+            and a[besti + bestsize] == b[bestj + bestsize]
+        ):
             bestsize += 1
 
         # Now that we have a wholly interesting match (albeit possibly
@@ -875,13 +925,14 @@ class StreamTextSequenceMatcher:
         # figuring out what to do with it.  In the case of an empty
         # interesting match, this is clearly the right thing to do,
         # because no other kind of match is possible in the regions.
-        while besti > alo and bestj > blo and \
-              isbjunk(b[bestj-1]) and \
-              a[besti-1] == b[bestj-1]:
-            besti, bestj, bestsize = besti-1, bestj-1, bestsize+1
-        while besti+bestsize < ahi and bestj+bestsize < bhi and \
-              isbjunk(b[bestj+bestsize]) and \
-              a[besti+bestsize] == b[bestj+bestsize]:
+        while besti > alo and bestj > blo and isbjunk(b[bestj - 1]) and a[besti - 1] == b[bestj - 1]:
+            besti, bestj, bestsize = besti - 1, bestj - 1, bestsize + 1
+        while (
+            besti + bestsize < ahi
+            and bestj + bestsize < bhi
+            and isbjunk(b[bestj + bestsize])
+            and a[besti + bestsize] == b[bestj + bestsize]
+        ):
             bestsize = bestsize + 1
 
         return Match(besti, bestj, bestsize)
@@ -923,12 +974,12 @@ class StreamTextSequenceMatcher:
             # a[alo:i] vs b[blo:j] unknown
             # a[i:i+k] same as b[j:j+k]
             # a[i+k:ahi] vs b[j+k:bhi] unknown
-            if k:   # if k is 0, there was no matching block
+            if k:  # if k is 0, there was no matching block
                 matching_blocks.append(x)
                 if alo < i and blo < j:
                     queue.append((alo, i, blo, j))
-                if i+k < ahi and j+k < bhi:
-                    queue.append((i+k, ahi, j+k, bhi))
+                if i + k < ahi and j + k < bhi:
+                    queue.append((i + k, ahi, j + k, bhi))
         matching_blocks.sort()
 
         # It's possible that we have adjacent equal blocks in the
@@ -953,7 +1004,7 @@ class StreamTextSequenceMatcher:
         if k1:
             non_adjacent.append((i1, j1, k1))
 
-        non_adjacent.append( (la, lb, 0) )
+        non_adjacent.append((la, lb, 0))
         self.matching_blocks = list(map(Match._make, non_adjacent))
         return self.matching_blocks
 
@@ -977,18 +1028,18 @@ class StreamTextSequenceMatcher:
         i = j = 0
         coarse_opcodes = []
         for ai, bj, size in self.get_matching_blocks():
-            tag = ''
+            tag = ""
             if i < ai and j < bj:
-                tag = 'replace'
+                tag = "replace"
             elif i < ai:
-                tag = 'delete'
+                tag = "delete"
             elif j < bj:
-                tag = 'insert'
+                tag = "insert"
             if tag:
-                coarse_opcodes.append( (tag, i, ai, j, bj) )
-            i, j = ai+size, bj+size
+                coarse_opcodes.append((tag, i, ai, j, bj))
+            i, j = ai + size, bj + size
             if size:
-                coarse_opcodes.append( ('equal', ai, i, bj, j) )
+                coarse_opcodes.append(("equal", ai, i, bj, j))
 
         # --- Step 2: Refinement and Offset Translation ---
         # We transform the coarse block indices into useful offsets.
@@ -1004,8 +1055,8 @@ class StreamTextSequenceMatcher:
             # We need to convert chunk indices to actual BYTE offsets in the file.
 
             # Calculate start/end byte offsets for stream A
-            a_start = self.a_offsets[i1] if i1 < len(self.a_offsets) else (self.a_offsets[-1] + self.chunk_size if self.a_offsets else 0)
-            a_end = self.a_offsets[i2] if i2 < len(self.a_offsets) else (self.a_offsets[-1] + self.chunk_size if self.a_offsets else 0)
+            a_start = self.a_offsets[i1] if i1 < len(self.a_offsets) else (self.a_offsets[-1] + self.chunk_size if self.a_offsets else 0)  # noqa: E501
+            a_end = self.a_offsets[i2] if i2 < len(self.a_offsets) else (self.a_offsets[-1] + self.chunk_size if self.a_offsets else 0)  # noqa: E501
 
             # Special handling for EOF: if the range goes to the end, use actual file position
             if i2 == len(self.a) and len(self.a_offsets) > 0:
@@ -1013,8 +1064,8 @@ class StreamTextSequenceMatcher:
                 a_end = self.a_stream.tell()
 
             # Calculate start/end byte offsets for stream B
-            b_start = self.b_offsets[j1] if j1 < len(self.b_offsets) else (self.b_offsets[-1] + self.chunk_size if self.b_offsets else 0)
-            b_end = self.b_offsets[j2] if j2 < len(self.b_offsets) else (self.b_offsets[-1] + self.chunk_size if self.b_offsets else 0)
+            b_start = self.b_offsets[j1] if j1 < len(self.b_offsets) else (self.b_offsets[-1] + self.chunk_size if self.b_offsets else 0)  # noqa: E501
+            b_end = self.b_offsets[j2] if j2 < len(self.b_offsets) else (self.b_offsets[-1] + self.chunk_size if self.b_offsets else 0)  # noqa: E501
 
             if j2 == len(self.b) and len(self.b_offsets) > 0:
                 self.b_stream.seek(0, os.SEEK_END)
@@ -1024,7 +1075,7 @@ class StreamTextSequenceMatcher:
             # If we found a 'replace' block, it means the hashes didn't match.
             # But maybe only 1 byte changed in a 64-byte chunk!
             # So we read the ACTUAL bytes and compare them precisely.
-            if tag == 'replace':
+            if tag == "replace":
                 chunk_a = self._read_range(self.a_stream, self.a_offsets, i1, i2)
                 chunk_b = self._read_range(self.b_stream, self.b_offsets, j1, j2)
 
@@ -1032,9 +1083,7 @@ class StreamTextSequenceMatcher:
                 # This gives us exact byte-level differences.
                 fine_sm = difflib.SequenceMatcher(None, chunk_a, chunk_b, autojunk=False)
                 yield from (
-                    (sub_tag,
-                    a_start + sub_i1, a_start + sub_i2,
-                    b_start + sub_j1, b_start + sub_j2,)
+                    (sub_tag, a_start + sub_i1, a_start + sub_i2, b_start + sub_j1, b_start + sub_j2)
                     for sub_tag, sub_i1, sub_i2, sub_j1, sub_j2 in fine_sm.get_opcodes()
                 )
             else:
@@ -1043,13 +1092,13 @@ class StreamTextSequenceMatcher:
 
     # Helpers for compatibility/testing
     def get_lines(self, stream_type: str) -> list[bytes]:
-        stream = self.a_stream if stream_type == 'a' else self.b_stream
+        stream = self.a_stream if stream_type == "a" else self.b_stream
         stream.seek(0)
         return stream.readlines()
 
     def get_lines_from_stream(self, stream_type: str, start_index: int, end_index: int) -> list[bytes]:
-        stream = self.a_stream if stream_type == 'a' else self.b_stream
-        offsets = self.a_offsets if stream_type == 'a' else self.b_offsets
+        stream = self.a_stream if stream_type == "a" else self.b_stream
+        offsets = self.a_offsets if stream_type == "a" else self.b_offsets
         if not offsets or start_index < 0 or start_index >= len(offsets) or end_index < start_index:
             return []
         raw_bytes = self._read_range(stream, offsets, start_index, end_index)

@@ -4,7 +4,6 @@ import logging
 
 from .pydifflib import RollingHashMatcher, StreamSequenceMatcher
 
-
 logger = logging.getLogger(__name__)
 
 # BSDIFF40 header structure (32 bytes)
@@ -14,6 +13,7 @@ logger = logging.getLogger(__name__)
 # 24-32: Length of new file (int64_t, little-endian, sign-magnitude)
 BSDIFF40_MAGIC = b"BSDIFF40"
 HEADER_SIZE = 32
+
 
 def _read_off_t(data: bytes) -> int:
     """
@@ -32,6 +32,7 @@ def _read_off_t(data: bytes) -> int:
     if data[7] & 0x80:
         y = -y
     return y
+
 
 def _write_off_t(value: int) -> bytes:
     """
@@ -52,7 +53,8 @@ def _write_off_t(value: int) -> bytes:
     data[7] |= sign
     return bytes(data)
 
-def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'default') -> bytes:  # noqa: C901
+
+def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = "default") -> bytes:  # noqa: C901
     """
     Generates a binary patch in BSDIFF40 format.
 
@@ -81,7 +83,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'defa
     new_stream = io.BytesIO(new)
 
     # Select Matcher
-    if matcher_type == 'rolling':
+    if matcher_type == "rolling":
         matcher = RollingHashMatcher(old_stream, new_stream, chunk_size=chunk_size)
     else:
         # Default to StreamSequenceMatcher (Fast Hash)
@@ -102,7 +104,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'defa
     curr_extra_data = bytearray()
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'equal':
+        if tag == "equal":
             # Check flush: Diff -> Extra -> Seek
             # If we have pending Extra or Seek, we must flush current tuple
             if current_extra_len > 0 or current_seek_len != 0:
@@ -119,11 +121,11 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'defa
             # Append to Diff
             seg_len = i2 - i1
             current_diff_len += seg_len
-            curr_diff_data.extend(b'\0' * seg_len)
+            curr_diff_data.extend(b"\0" * seg_len)
 
             # Equal block advances old_pos implicitly by diff_len. So seek_len remains 0.
 
-        elif tag == 'replace':
+        elif tag == "replace":
             # Check flush
             if current_extra_len > 0 or current_seek_len != 0:
                 ctrl_tuples.append((current_diff_len, current_extra_len, current_seek_len))
@@ -162,7 +164,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'defa
                 seek_len = len_old - len_new
                 current_seek_len += seek_len
 
-        elif tag == 'insert':
+        elif tag == "insert":
             # Check flush: if pending Seek, must flush
             if current_seek_len != 0:
                 ctrl_tuples.append((current_diff_len, current_extra_len, current_seek_len))
@@ -179,7 +181,7 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'defa
             curr_extra_data.extend(new_stream.read(len_new))
             current_extra_len += len_new
 
-        elif tag == 'delete':
+        elif tag == "delete":
             # Accumulate Seek
             len_old = i2 - i1
             current_seek_len += len_old
@@ -209,12 +211,15 @@ def diff(old: bytes, new: bytes, chunk_size: int = 64, matcher_type: str = 'defa
     compressed_extra = bz2.compress(extra_buf.getvalue())
 
     # Build header
-    header = BSDIFF40_MAGIC + \
-             _write_off_t(len(compressed_ctrl)) + \
-             _write_off_t(len(compressed_diff)) + \
-             _write_off_t(len(new))
+    header = (
+        BSDIFF40_MAGIC
+        + _write_off_t(len(compressed_ctrl))
+        + _write_off_t(len(compressed_diff))
+        + _write_off_t(len(new))
+    )
 
     return header + compressed_ctrl + compressed_diff + compressed_extra
+
 
 def _optimize_patch(ctrl_tuples, diff_buf, extra_buf, old_stream):
     """
@@ -250,7 +255,7 @@ def _optimize_patch(ctrl_tuples, diff_buf, extra_buf, old_stream):
             overlap_len = min(e_len, s_len)
             # Only optimize if it's worth it (e.g. > 8 bytes)
             if overlap_len > 8:
-                 is_mergeable = True
+                is_mergeable = True
 
         if is_mergeable:
             # Perform merge
@@ -307,11 +312,12 @@ def _optimize_patch(ctrl_tuples, diff_buf, extra_buf, old_stream):
             extra_ptr += e_len
 
         # s_len is just a number, no data to copy.
-        old_pos += s_len # Virtual seek
+        old_pos += s_len  # Virtual seek
 
         new_ctrls.append((d_len, e_len, s_len))
 
     return new_ctrls, new_diff, new_extra
+
 
 def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
     """
@@ -355,8 +361,10 @@ def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
         seek_move_len = _read_off_t(ctrl_data[16:24])
 
         # Debug output
-        logger.debug(f"Patch Ctrl: diff={diff_read_len}, extra={extra_read_len},"
-            " seek={seek_move_len} | old_pos={old_pos}, new_pos={new_pos}")
+        logger.debug(
+            f"Patch Ctrl: diff={diff_read_len}, extra={extra_read_len},"
+            " seek={seek_move_len} | old_pos={old_pos}, new_pos={new_pos}"
+        )
 
         # 1. Apply diff data
         if diff_read_len > 0:
@@ -368,7 +376,7 @@ def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
             if 0 <= old_pos and old_pos + diff_read_len <= len(old):
                 # Fast path
                 old_slice = old[old_pos : old_pos + diff_read_len]
-                chunk = bytearray((ov + dv) & 0xFF for ov, dv in zip(old_slice, diff_segment))
+                chunk = bytearray((ov + dv) & 0xFF for ov, dv in zip(old_slice, diff_segment, strict=False))
                 new_data[new_pos : new_pos + diff_read_len] = chunk
             else:
                 # Slow path (bounds checking)
@@ -378,7 +386,7 @@ def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
                     if 0 <= curr_old_pos < len(old):
                         old_val = old[curr_old_pos]
                     else:
-                        old_val = 0 # Out of bounds = 0
+                        old_val = 0  # Out of bounds = 0
                     chunk[i] = (old_val + diff_segment[i]) & 0xFF
                 new_data[new_pos : new_pos + diff_read_len] = chunk
 
@@ -389,7 +397,7 @@ def patch(old: bytes, patch_data: bytes) -> bytes:  # noqa: C901
         if extra_read_len > 0:
             extra_segment = extra_buf.read(extra_read_len)
             if len(extra_segment) != extra_read_len:
-                 raise ValueError("Corrupt patch: extra block truncated")
+                raise ValueError("Corrupt patch: extra block truncated")
 
             new_data[new_pos : new_pos + extra_read_len] = extra_segment
             new_pos += extra_read_len

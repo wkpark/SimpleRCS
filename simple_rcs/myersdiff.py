@@ -31,12 +31,12 @@ import zlib
 from collections.abc import Iterator
 from typing import BinaryIO
 
-
 # original comments are preserved:
 # Linked List Node for history trace: (tag, prev_node)
 # tag: 'i' (insert), 'd' (delete)
 # prev_node: reference to previous node tuple or None
 # We ONLY track edits (insert/delete). Equal moves are implicit and replayed.
+
 
 class MyersSequenceMatcher:
     """
@@ -118,10 +118,10 @@ class MyersSequenceMatcher:
 
                 if k == -d or (k != d and x_minus < x_plus):
                     x = x_plus
-                    history = ('i', h_plus)
+                    history = ("i", h_plus)
                 else:
                     x = x_minus + 1
-                    history = ('d', h_minus)
+                    history = ("d", h_minus)
 
                 # Snake: Extension for matching lines (Diagonal moves)
                 # y = x - k
@@ -170,11 +170,11 @@ class MyersSequenceMatcher:
         def emit_diff(end_i, end_j):
             nonlocal diff_start_i, diff_start_j
             if diff_start_i < end_i and diff_start_j < end_j:
-                yield ('replace', diff_start_i, end_i, diff_start_j, end_j)
+                yield ("replace", diff_start_i, end_i, diff_start_j, end_j)
             elif diff_start_i < end_i:
-                yield ('delete', diff_start_i, end_i, diff_start_j, end_j)
+                yield ("delete", diff_start_i, end_i, diff_start_j, end_j)
             elif diff_start_j < end_j:
-                yield ('insert', diff_start_i, end_i, diff_start_j, end_j)
+                yield ("insert", diff_start_i, end_i, diff_start_j, end_j)
             diff_start_i = end_i
             diff_start_j = end_j
 
@@ -194,7 +194,7 @@ class MyersSequenceMatcher:
                 yield from emit_diff(start_i, start_j)
 
                 # Emit the equal block
-                yield ('equal', start_i, i, start_j, j)
+                yield ("equal", start_i, i, start_j, j)
 
                 # Reset diff start points to after the equal block
                 diff_start_i = i
@@ -211,9 +211,9 @@ class MyersSequenceMatcher:
                 # Should not happen if path is correct and logic matches
                 break
 
-            if op == 'd':
+            if op == "d":
                 i += 1
-            elif op == 'i':
+            elif op == "i":
                 j += 1
 
             # We don't emit immediately. We continue loop to see if more edits follow or a diagonal.
@@ -254,11 +254,13 @@ class MyersStreamSequenceMatcher:
                 break
 
             offset_list.append(start_offset)
-            content_to_hash = chunk if self.chunk_size else chunk.rstrip(b'\r\n')
+            content_to_hash = chunk if self.chunk_size else chunk.rstrip(b"\r\n")
             hash_list.append(zlib.crc32(content_to_hash) & 0xFFFFFFFF)
         return hash_list
 
-    def _get_byte_offset(self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None) -> int:
+    def _get_byte_offset(
+        self, offsets: list[int], idx: int, is_end: bool = False, stream: BinaryIO | None = None
+    ) -> int:
         """Gets the byte offset for a given chunk/line index."""
         if idx < len(offsets):
             return offsets[idx]
@@ -270,11 +272,11 @@ class MyersStreamSequenceMatcher:
             # If it's an end index, it should point to the end of the last chunk
             last_offset = offsets[-1]
             if self.chunk_size:
-                 # This is an approximation, reading the last chunk would be more accurate
-                 return last_offset + self.chunk_size
+                # This is an approximation, reading the last chunk would be more accurate
+                return last_offset + self.chunk_size
             else:
-                 # For line mode, it's harder to guess, returning last known offset
-                 return last_offset
+                # For line mode, it's harder to guess, returning last known offset
+                return last_offset
         return 0
 
     def get_opcodes(self) -> Iterator[tuple[str, int, int, int, int]]:
@@ -360,10 +362,10 @@ class MyersStreamSequenceMatcher:
 
                 if k == -d or (k != d and x_minus < x_plus):
                     x = x_plus
-                    history = ('i', h_plus)
+                    history = ("i", h_plus)
                 else:
                     x = x_minus + 1
-                    history = ('d', h_minus)
+                    history = ("d", h_minus)
 
                 # Snake: Extension for matching lines (Diagonal moves)
                 y = x - k
@@ -406,11 +408,11 @@ class MyersStreamSequenceMatcher:
         def emit_diff(end_i, end_j):
             nonlocal diff_start_i, diff_start_j
             if diff_start_i < end_i and diff_start_j < end_j:
-                yield ('replace', diff_start_i, end_i, diff_start_j, end_j)
+                yield ("replace", diff_start_i, end_i, diff_start_j, end_j)
             elif diff_start_i < end_i:
-                yield ('delete', diff_start_i, end_i, diff_start_j, end_j)
+                yield ("delete", diff_start_i, end_i, diff_start_j, end_j)
             elif diff_start_j < end_j:
-                yield ('insert', diff_start_i, end_i, diff_start_j, end_j)
+                yield ("insert", diff_start_i, end_i, diff_start_j, end_j)
             diff_start_i = end_i
             diff_start_j = end_j
 
@@ -430,7 +432,7 @@ class MyersStreamSequenceMatcher:
                 yield from emit_diff(start_i, start_j)
 
                 # Emit the equal block
-                yield ('equal', start_i, i, start_j, j)
+                yield ("equal", start_i, i, start_j, j)
 
                 # Reset diff start points to after the equal block
                 diff_start_i = i
@@ -447,9 +449,9 @@ class MyersStreamSequenceMatcher:
                 # Should not happen if path is correct and logic matches
                 break
 
-            if op == 'd':
+            if op == "d":
                 i += 1
-            elif op == 'i':
+            elif op == "i":
                 j += 1
 
             # We don't emit immediately. We continue loop to see if more edits follow or a diagonal.

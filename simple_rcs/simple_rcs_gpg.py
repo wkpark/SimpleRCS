@@ -4,15 +4,16 @@ import subprocess
 import sys
 import tempfile
 
-
 logger = logging.getLogger(__name__)
 # Basic logging config if not already configured by application
 if not logging.root.handlers:
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
 
 def _get_gpg_command() -> str:
     """Determines the GPG command to use based on SRCS_GPGSIGN_PATH or system PATH."""
     return os.environ.get("SRCS_GPGSIGN_PATH", "gpg")
+
 
 def get_gpg_uid(key_id: str) -> tuple[str, str]:  # noqa: C901
     """
@@ -25,33 +26,35 @@ def get_gpg_uid(key_id: str) -> tuple[str, str]:  # noqa: C901
         # Check if key_id is valid to avoid "No public key" error output being misinterpreted or raising exception
         res = subprocess.run(
             [gpg_cmd, "--list-keys", "--with-colons", key_id],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
 
         uid_string = key_id
         trust_level = "unknown"
 
         for line in res.stdout.splitlines():
-            parts = line.split(':')
+            parts = line.split(":")
 
             # pub:u:4096:1:KEYID:...
             # Index 1 is trust (validity)
             if line.startswith("pub:"):
                 if len(parts) > 1 and parts[1]:
                     owner_trust_char = parts[1]
-                    if owner_trust_char == 'u':
+                    if owner_trust_char == "u":
                         trust_level = "ultimate"
-                    elif owner_trust_char == 'f':
+                    elif owner_trust_char == "f":
                         trust_level = "fully"
-                    elif owner_trust_char == 'm':
+                    elif owner_trust_char == "m":
                         trust_level = "marginal"
-                    elif owner_trust_char == 'q':
+                    elif owner_trust_char == "q":
                         trust_level = "undefined"
-                    elif owner_trust_char == 'n':
+                    elif owner_trust_char == "n":
                         trust_level = "never"
-                    elif owner_trust_char == 'e':
+                    elif owner_trust_char == "e":
                         trust_level = "expired"
-                    elif owner_trust_char == '-':
+                    elif owner_trust_char == "-":
                         trust_level = "unknown"
 
             if line.startswith("uid:"):
@@ -61,12 +64,12 @@ def get_gpg_uid(key_id: str) -> tuple[str, str]:  # noqa: C901
                     # or if UID specific trust is available.
                     if len(parts) > 1 and parts[1]:
                         uid_trust_char = parts[1]
-                        if trust_level == "unknown" and uid_trust_char in 'ufmqne':
-                             if uid_trust_char == 'u':
+                        if trust_level == "unknown" and uid_trust_char in "ufmqne":
+                            if uid_trust_char == "u":
                                 trust_level = "ultimate"
-                             elif uid_trust_char == 'f':
+                            elif uid_trust_char == "f":
                                 trust_level = "fully"
-                             elif uid_trust_char == 'm':
+                            elif uid_trust_char == "m":
                                 trust_level = "marginal"
 
         return uid_string, trust_level
@@ -74,6 +77,7 @@ def get_gpg_uid(key_id: str) -> tuple[str, str]:  # noqa: C901
         logger.warning(f"GPG key lookup for '{key_id}' failed: {e}")
 
     return key_id, "unknown"
+
 
 def get_default_signer_id() -> str:
     """
@@ -85,16 +89,18 @@ def get_default_signer_id() -> str:
     if signer_key_env:
         # If env var provides key_id, try to get its UID
         uid, _ = get_gpg_uid(signer_key_env)
-        if uid != signer_key_env: # If lookup was successful
+        if uid != signer_key_env:  # If lookup was successful
             return uid
-        return signer_key_env # Fallback to key_id
+        return signer_key_env  # Fallback to key_id
 
     # Try to get default key ID from gpg
     gpg_cmd = _get_gpg_command()
     try:
         res = subprocess.run(
             [gpg_cmd, "--list-secret-keys", "--with-colons"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         for line in res.stdout.splitlines():
             if line.startswith("uid:"):
@@ -105,6 +111,7 @@ def get_default_signer_id() -> str:
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         logger.warning(f"GPG --list-secret-keys failed: {e}. Using 'unknown_gpg_user'.")
     return "unknown_gpg_user"
+
 
 def gpg_sign_callback(message: str, signer_id: str | None = None) -> tuple[str, str]:
     """
@@ -133,7 +140,7 @@ def gpg_sign_callback(message: str, signer_id: str | None = None) -> tuple[str, 
 
     if sign_mode == "clearsign":
         cmd.append("--clearsign")
-    else: # Default to detach-sign
+    else:  # Default to detach-sign
         cmd.append("--detach-sign")
 
     # Environment for pinentry-tty.
@@ -144,12 +151,12 @@ def gpg_sign_callback(message: str, signer_id: str | None = None) -> tuple[str, 
     try:
         process = subprocess.run(
             cmd,
-            input=message.encode('utf-8'),
-            capture_output=True, # Signature is on stdout
+            input=message.encode("utf-8"),
+            capture_output=True,  # Signature is on stdout
             check=True,
             env=env,
         )
-        signature = process.stdout.decode('utf-8').strip()
+        signature = process.stdout.decode("utf-8").strip()
 
         if sign_mode == "clearsign":
             logger.warning("SRCS_SIGN_MODE=clearsign used, but SimpleRCS expects detached signature.")
@@ -162,6 +169,7 @@ def gpg_sign_callback(message: str, signer_id: str | None = None) -> tuple[str, 
     except FileNotFoundError as e:
         logger.error(f"GPG cmd not found at '{gpg_cmd}'.")
         raise ValueError(f"GPG cmd not found at '{gpg_cmd}'. Ensure GPG is installed or SRCS_GPGSIGN_PATH.") from e
+
 
 def gpg_verify_callback(signer_id: str, message: str, signature: str) -> bool:
     """
@@ -177,7 +185,7 @@ def gpg_verify_callback(signer_id: str, message: str, signature: str) -> bool:
     """
     gpg_cmd = _get_gpg_command()
 
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as sig_file:
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as sig_file:
         sig_file.write(signature)
         sig_path = sig_file.name
 
@@ -187,8 +195,8 @@ def gpg_verify_callback(signer_id: str, message: str, signature: str) -> bool:
 
         subprocess.run(
             cmd,
-            input=message.encode('utf-8'),
-            capture_output=True, # Capture both stdout/stderr
+            input=message.encode("utf-8"),
+            capture_output=True,  # Capture both stdout/stderr
             check=True,
         )
         return True
