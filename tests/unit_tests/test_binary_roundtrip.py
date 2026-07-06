@@ -13,7 +13,6 @@ Covers:
 """
 
 import hashlib
-import io
 import os
 import struct
 
@@ -61,12 +60,13 @@ def _modify_insert(data: bytes, offset: int, insert: bytes) -> bytes:
 
 
 def _modify_delete(data: bytes, offset: int, length: int) -> bytes:
-    return data[:offset] + data[offset + length:]
+    return data[:offset] + data[offset + length :]
 
 
 # ---------------------------------------------------------------------------
 # Basic roundtrip
 # ---------------------------------------------------------------------------
+
 
 def test_binary_basic_commit_checkout():
     """commit(bytes) → checkout() returns identical bytes."""
@@ -100,7 +100,7 @@ def test_binary_three_version_chain():
     rcs = _make_rcs()
     base = _make_binary(32768, seed=3)
     v1 = base
-    v2 = _modify_inplace(base, offset=100,   length=50)
+    v2 = _modify_inplace(base, offset=100, length=50)
     v3 = _modify_inplace(base, offset=16000, length=50)
 
     rcs.commit(v1, log="v1")
@@ -116,48 +116,49 @@ def test_binary_three_version_chain():
 # Structural change scenarios
 # ---------------------------------------------------------------------------
 
+
 def test_binary_inplace_modification():
     """Single-byte modification in the middle — chunk boundaries unchanged."""
     rcs = _make_rcs()
     orig = _make_binary(65536, seed=10)
     modified = bytearray(orig)
-    modified[32768] ^= 0xFF          # flip one byte
+    modified[32768] ^= 0xFF  # flip one byte
     modified = bytes(modified)
 
-    rcs.commit(orig,     log="original")
+    rcs.commit(orig, log="original")
     rcs.commit(modified, log="flip one byte")
 
-    assert rcs.checkout("1.0") == orig,     "original not restored after single-byte flip"
+    assert rcs.checkout("1.0") == orig, "original not restored after single-byte flip"
     assert rcs.checkout("1.1") == modified, "modified HEAD mismatch"
 
 
 def test_binary_insertion_shifts_chunks():
     """Insert 200 bytes in the middle — all subsequent chunk boundaries shift."""
     rcs = _make_rcs()
-    orig     = _make_binary(65536, seed=20)
-    inserted = _modify_insert(orig, offset=len(orig) // 2, insert=b"\xDE\xAD\xBE\xEF" * 50)
+    orig = _make_binary(65536, seed=20)
+    inserted = _modify_insert(orig, offset=len(orig) // 2, insert=b"\xde\xad\xbe\xef" * 50)
 
     assert len(inserted) == len(orig) + 200
 
-    rcs.commit(orig,     log="original")
+    rcs.commit(orig, log="original")
     rcs.commit(inserted, log="insert 200 bytes at midpoint")
 
-    assert rcs.checkout("1.0") == orig,     "original not restored after insertion"
+    assert rcs.checkout("1.0") == orig, "original not restored after insertion"
     assert rcs.checkout("1.1") == inserted, "inserted version HEAD mismatch"
 
 
 def test_binary_deletion():
     """Delete 512 bytes — subsequent data shifts up."""
     rcs = _make_rcs()
-    orig    = _make_binary(65536, seed=30)
+    orig = _make_binary(65536, seed=30)
     deleted = _modify_delete(orig, offset=4096, length=512)
 
     assert len(deleted) == len(orig) - 512
 
-    rcs.commit(orig,    log="original")
+    rcs.commit(orig, log="original")
     rcs.commit(deleted, log="delete 512 bytes")
 
-    assert rcs.checkout("1.0") == orig,    "original not restored after deletion"
+    assert rcs.checkout("1.0") == orig, "original not restored after deletion"
     assert rcs.checkout("1.1") == deleted, "deleted version HEAD mismatch"
 
 
@@ -168,44 +169,46 @@ def test_binary_multiple_scattered_edits():
 
     v2 = bytearray(orig)
     for offset in [1000, 20000, 60000, 100000]:
-        v2[offset:offset + 16] = b"\xAB\xCD" * 8
+        v2[offset : offset + 16] = b"\xab\xcd" * 8
     v2 = bytes(v2)
 
     rcs.commit(orig, log="v1")
-    rcs.commit(v2,   log="v2 scattered edits")
+    rcs.commit(v2, log="v2 scattered edits")
 
     assert rcs.checkout("1.0") == orig, "v1 not restored"
-    assert rcs.checkout("1.1") == v2,   "v2 mismatch"
+    assert rcs.checkout("1.1") == v2, "v2 mismatch"
 
 
 # ---------------------------------------------------------------------------
 # Encoding variants
 # ---------------------------------------------------------------------------
 
+
 def test_binary_base85_encoding():
     """Verify roundtrip with base85 encoding (more compact than base64)."""
     rcs = _make_rcs()
     orig = _make_binary(16384, seed=50)
-    mod  = _modify_inplace(orig, offset=8000, length=32)
+    mod = _modify_inplace(orig, offset=8000, length=32)
 
     rcs.commit(orig, log="v1")
-    rcs.commit(mod,  log="v2", encoding="base85")
+    rcs.commit(mod, log="v2", encoding="base85")
 
     assert rcs.checkout("1.0") == orig, "base85: v1 roundtrip failed"
-    assert rcs.checkout("1.1") == mod,  "base85: v2 roundtrip failed"
+    assert rcs.checkout("1.1") == mod, "base85: v2 roundtrip failed"
 
 
 # ---------------------------------------------------------------------------
 # Type change boundary (text → binary)
 # ---------------------------------------------------------------------------
 
+
 def test_text_then_binary_type_change():
     """Switching from text to binary forces a snapshot — both must be retrievable."""
     rcs = _make_rcs()
-    text_content   = "Hello, world!\nSecond line.\n"
+    text_content = "Hello, world!\nSecond line.\n"
     binary_content = _make_binary(4096, seed=60)
 
-    rcs.commit(text_content,   log="text version")
+    rcs.commit(text_content, log="text version")
     rcs.commit(binary_content, log="binary version")  # type change → snapshot
 
     result_text = rcs.checkout("1.0")
@@ -221,11 +224,12 @@ def test_text_then_binary_type_change():
 # Snapshot in binary chain
 # ---------------------------------------------------------------------------
 
+
 def test_binary_snapshot_chain():
     """Snapshot mid-chain: checkout across snapshot boundary must be correct."""
     rcs = _make_rcs()
     v1 = _make_binary(32768, seed=70)
-    v2 = _modify_inplace(v1, offset=100,   length=32)
+    v2 = _modify_inplace(v1, offset=100, length=32)
     v3 = _modify_inplace(v2, offset=16000, length=32)
     v4 = _modify_inplace(v3, offset=30000, length=32)
 
@@ -244,25 +248,27 @@ def test_binary_snapshot_chain():
 # File-based (disk I/O)
 # ---------------------------------------------------------------------------
 
+
 def test_binary_file_based_roundtrip(tmp_path):
     """SimpleRCS backed by a real on-disk file — binary commit/checkout."""
     rcs_path = str(tmp_path / "binary.rcs")
     orig = _make_binary(65536, seed=80)
-    mod  = _modify_inplace(orig, offset=32000, length=64)
+    mod = _modify_inplace(orig, offset=32000, length=64)
 
     rcs = SimpleRCS(rcs_path)
     rcs.commit(orig, log="v1")
-    rcs.commit(mod,  log="v2")
+    rcs.commit(mod, log="v2")
 
     # Re-open from disk
     rcs2 = SimpleRCS(rcs_path)
     assert rcs2.checkout("1.0") == orig, "disk-based v1 roundtrip failed"
-    assert rcs2.checkout("1.1") == mod,  "disk-based v2 roundtrip failed"
+    assert rcs2.checkout("1.1") == mod, "disk-based v2 roundtrip failed"
 
 
 # ---------------------------------------------------------------------------
 # Large real binary file (PDF)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(not os.path.exists(PDF_PATH), reason=f"test file not found: {PDF_PATH}")
 def test_pdf_inplace_modification_roundtrip():
@@ -283,7 +289,7 @@ def test_pdf_inplace_modification_roundtrip():
 
     rcs = _make_rcs()
     rcs.commit(orig, log="original pdf")
-    rcs.commit(mod,  log="modified pdf")
+    rcs.commit(mod, log="modified pdf")
 
     restored_v1 = rcs.checkout("1.0")
     assert isinstance(restored_v1, bytes)
@@ -304,10 +310,10 @@ def test_pdf_insertion_roundtrip():
     inserted = orig[:mid] + b"\x00" * 100 + orig[mid:]
 
     rcs = _make_rcs()
-    rcs.commit(orig,     log="original pdf")
+    rcs.commit(orig, log="original pdf")
     rcs.commit(inserted, log="100-byte insert at midpoint")
 
-    assert rcs.checkout("1.0") == orig,     "PDF v1 not restored after insertion"
+    assert rcs.checkout("1.0") == orig, "PDF v1 not restored after insertion"
     assert rcs.checkout("1.1") == inserted, "PDF inserted version mismatch"
 
 
@@ -320,7 +326,7 @@ def test_pdf_three_version_chain():
     size = len(orig)
     v1 = orig
     v2 = _modify_inplace(orig, offset=size // 4, length=50)
-    v3 = _modify_insert(v2, offset=size // 2, insert=b"\xFF" * 64)
+    v3 = _modify_insert(v2, offset=size // 2, insert=b"\xff" * 64)
 
     rcs = _make_rcs()
     rcs.commit(v1, log="pdf v1")

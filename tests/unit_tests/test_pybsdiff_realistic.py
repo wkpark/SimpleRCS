@@ -6,9 +6,9 @@ import pytest
 
 from simple_rcs.pybsdiff import diff, patch
 
-
 BSDIFF_CMD = shutil.which("bsdiff")
 BSPATCH_CMD = shutil.which("bspatch")
+
 
 def generate_realistic_log_data(num_lines=20000):
     """
@@ -18,16 +18,17 @@ def generate_realistic_log_data(num_lines=20000):
     lines = []
     for i in range(num_lines):
         # A typical log line structure
-        lines.append(f"2023-01-01 10:00:{i%60:02d} [INFO] User_{i} performed action_X on resource_Y result=SUCCESS\n")
+        lines.append(f"2023-01-01 10:00:{i % 60:02d} [INFO] User_{i} performed action_X on resource_Y result=SUCCESS\n")
 
-    return "".join(lines).encode('utf-8')
+    return "".join(lines).encode("utf-8")
+
 
 def modify_log_data(original_bytes):
     """
     Modifies the log data to simulate edits.
     """
     # Convert to list of lines for easy editing
-    lines = original_bytes.decode('utf-8').splitlines(keepends=True)
+    lines = original_bytes.decode("utf-8").splitlines(keepends=True)
 
     # 1. Modify some lines (change status)
     for i in range(0, len(lines), 100):
@@ -40,7 +41,8 @@ def modify_log_data(original_bytes):
     # 3. Delete a block of logs
     del lines[5000:5500]
 
-    return "".join(lines).encode('utf-8')
+    return "".join(lines).encode("utf-8")
+
 
 def _read_off_t(data):
     """Helper to read BSDIFF off_t (Sign-Magnitude)"""
@@ -50,6 +52,7 @@ def _read_off_t(data):
     if data[7] & 0x80:
         y = -y
     return y
+
 
 def _analyze_patch_structure(patch_data, name="Patch"):
     print(f"\n--- Analysis: {name} ---")
@@ -64,6 +67,7 @@ def _analyze_patch_structure(patch_data, name="Patch"):
     # Decompress Ctrl
     import bz2
     import io
+
     ctrl_block_compressed = patch_data[32 : 32 + ctrl_len]
     ctrl_buf = io.BytesIO(bz2.decompress(ctrl_block_compressed))
 
@@ -72,7 +76,8 @@ def _analyze_patch_structure(patch_data, name="Patch"):
     print("  IDX | Diff Len | Extra Len | Seek Len")
     while True:
         chunk = ctrl_buf.read(24)
-        if not chunk: break
+        if not chunk:
+            break
 
         d = _read_off_t(chunk[0:8])
         e = _read_off_t(chunk[8:16])
@@ -85,13 +90,14 @@ def _analyze_patch_structure(patch_data, name="Patch"):
 
     print(f"Total Control Tuples: {count}")
 
+
 @pytest.mark.skipif(not BSDIFF_CMD, reason="bsdiff not installed")
 @pytest.mark.benchmark
 def test_realistic_data_patch_size(tmp_path):
     print("\n--- Realistic Data Benchmark ---")
 
     # 1. Prepare Data
-    old_data = generate_realistic_log_data(num_lines=50000) # Approx 4-5 MB
+    old_data = generate_realistic_log_data(num_lines=50000)  # Approx 4-5 MB
     new_data = modify_log_data(old_data)
 
     old_file = tmp_path / "old.log"
@@ -99,7 +105,7 @@ def test_realistic_data_patch_size(tmp_path):
     old_file.write_bytes(old_data)
     new_file.write_bytes(new_data)
 
-    print(f"Old Size: {len(old_data)} bytes ({len(old_data)/1024/1024:.2f} MB)")
+    print(f"Old Size: {len(old_data)} bytes ({len(old_data) / 1024 / 1024:.2f} MB)")
     print(f"New Size: {len(new_data)} bytes")
 
     # Native bsdiff (Baseline)
@@ -125,7 +131,7 @@ def test_realistic_data_patch_size(tmp_path):
     print("\n[pybsdiff chunk=64]")
     print(f"Time: {time_64:.4f}s")
     print(f"Size: {size_64} bytes")
-    print(f"Size Ratio (vs Native): {size_64/native_size:.2f}x")
+    print(f"Size Ratio (vs Native): {size_64 / native_size:.2f}x")
 
     # Verify correctness
     assert patch(old_data, patch_64) == new_data
@@ -140,7 +146,7 @@ def test_realistic_data_patch_size(tmp_path):
     print("\n[pybsdiff chunk=2048]")
     print(f"Time: {time_2k:.4f}s")
     print(f"Size: {size_2k} bytes")
-    print(f"Size Ratio (vs Native): {size_2k/native_size:.2f}x")
+    print(f"Size Ratio (vs Native): {size_2k / native_size:.2f}x")
 
     # Verify correctness
     assert patch(old_data, patch_2k) == new_data
@@ -156,22 +162,22 @@ def test_realistic_data_patch_size(tmp_path):
     print("\n[pybsdiff chunk=4096]")
     print(f"Time: {time_4k:.4f}s")
     print(f"Size: {size_4k} bytes")
-    print(f"Size Ratio (vs Native): {size_4k/native_size:.2f}x")
-    print(f"Size Reduction (vs chunk=64): {(1 - size_4k/size_64)*100:.1f}%")
+    print(f"Size Ratio (vs Native): {size_4k / native_size:.2f}x")
+    print(f"Size Reduction (vs chunk=64): {(1 - size_4k / size_64) * 100:.1f}%")
 
     _analyze_patch_structure(patch_4k, "pybsdiff (Chunk=4096)")
 
     # pybsdiff (Rolling Hash) - Optimized for shift/insert/delete
-    print(f"\n[pybsdiff Rolling Hash chunk=4096]")
+    print("\n[pybsdiff Rolling Hash chunk=4096]")
     start = time.perf_counter()
-    patch_rolling = diff(old_data, new_data, chunk_size=4096, matcher_type='rolling')
+    patch_rolling = diff(old_data, new_data, chunk_size=4096, matcher_type="rolling")
     time_rolling = time.perf_counter() - start
     size_rolling = len(patch_rolling)
 
     print(f"Time: {time_rolling:.4f}s")
     print(f"Size: {size_rolling} bytes")
-    print(f"Size Ratio (vs Native): {size_rolling/native_size:.2f}x")
-    print(f"Time Ratio (vs Native): {time_rolling/native_time:.2f}x")
+    print(f"Size Ratio (vs Native): {size_rolling / native_size:.2f}x")
+    print(f"Time Ratio (vs Native): {time_rolling / native_time:.2f}x")
 
     _analyze_patch_structure(patch_rolling, "pybsdiff (Rolling Hash)")
 

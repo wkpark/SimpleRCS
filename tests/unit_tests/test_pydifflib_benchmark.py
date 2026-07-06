@@ -20,7 +20,7 @@ def create_large_content(num_lines=50000, modification_rate=100):
         lines_b[i] = f"This is line number {i} MODIFIED content."
 
     # Add some insertions
-    for i in range(0, num_lines, modification_rate * 2): # Less frequent insertions
+    for i in range(0, num_lines, modification_rate * 2):  # Less frequent insertions
         if i < len(lines_b):
             lines_b.insert(i, f"Inserted line at {i}")
 
@@ -28,6 +28,7 @@ def create_large_content(num_lines=50000, modification_rate=100):
     content_b = "\n".join(lines_b) + "\n"
 
     return content_a, content_b, lines_a, lines_b
+
 
 @pytest.mark.benchmark
 def test_benchmark_and_correctness():
@@ -39,21 +40,21 @@ def test_benchmark_and_correctness():
     content_a, content_b, lines_a, lines_b = create_large_content(num_lines)
 
     # --- Stream setup for pydifflib ---
-    stream_a_pydiff = io.BytesIO(content_a.encode('utf-8'))
-    stream_b_pydiff = io.BytesIO(content_b.encode('utf-8'))
+    stream_a_pydiff = io.BytesIO(content_a.encode("utf-8"))
+    stream_b_pydiff = io.BytesIO(content_b.encode("utf-8"))
 
     # --- List setup for standard difflib (for comparison) ---
     # difflib.SequenceMatcher expects a list of hashable elements.
     # For fair comparison, we feed it bytes of lines, stripped of newlines,
     # as pydifflib does for hashing.
-    stripped_bytes_a = [line.encode('utf-8').rstrip(b'\r\n') for line in lines_a]
-    stripped_bytes_b = [line.encode('utf-8').rstrip(b'\r\n') for line in lines_b]
+    stripped_bytes_a = [line.encode("utf-8").rstrip(b"\r\n") for line in lines_a]
+    stripped_bytes_b = [line.encode("utf-8").rstrip(b"\r\n") for line in lines_b]
 
     # 2. Benchmark difflib (matching core)
     print("Running standard difflib (matching core) for baseline...")
     start_time = time.perf_counter()
     std_matcher_core = difflib.SequenceMatcher(None, stripped_bytes_a, stripped_bytes_b, autojunk=False)
-    _ = list(std_matcher_core.get_opcodes()) # Consume generator
+    _ = list(std_matcher_core.get_opcodes())  # Consume generator
     difflib_core_time = time.perf_counter() - start_time
     print(f"Standard difflib (matching core) time: {difflib_core_time:.4f}s")
 
@@ -61,7 +62,7 @@ def test_benchmark_and_correctness():
     print("Running pydifflib (matching core + indexing overhead)...")
     start_time = time.perf_counter()
     pydiff_matcher = StreamSequenceMatcher(stream_a_pydiff, stream_b_pydiff, chunk_size=None)
-    _ = list(pydiff_matcher.get_opcodes()) # Consume generator
+    _ = list(pydiff_matcher.get_opcodes())  # Consume generator
     pydifflib_total_time = time.perf_counter() - start_time
     print(f"pydifflib (total) time: {pydifflib_total_time:.4f}s")
     print(f"Ratio (pydifflib/difflib core): {pydifflib_total_time / difflib_core_time:.2f}x")
@@ -89,26 +90,38 @@ def test_benchmark_and_correctness():
 
     # Generate Unified Diff from standard difflib (original lines with newlines)
     std_unified_output_gen = difflib.unified_diff(
-        [l + '\n' for l in lines_a],
-        [l + '\n' for l in lines_b],
-        fromfile="Old", tofile="New", lineterm='\n',
+        [line + "\n" for line in lines_a],
+        [line + "\n" for line in lines_b],
+        fromfile="Old",
+        tofile="New",
+        lineterm="\n",
     )
-    std_unified_output = "".join(list(std_unified_output_gen))
+    _std_unified_output = "".join(list(std_unified_output_gen))
 
     # Generate Unified Diff from pydifflib (reconstructing via opcodes)
     # This involves fetching lines via pydiff_matcher.get_lines_from_stream
     pydiff_unified_output_lines = []
     for tag, i1, i2, j1, j2 in pydiff_matcher.get_opcodes():
-        if tag == 'equal':
-            pydiff_unified_output_lines.extend([' ' + line.decode('utf-8') for line in pydiff_matcher.get_lines_from_stream('a', i1, i2)])
-        elif tag == 'delete':
-            pydiff_unified_output_lines.extend(['-' + line.decode('utf-8') for line in pydiff_matcher.get_lines_from_stream('a', i1, i2)])
-        elif tag == 'insert':
-            pydiff_unified_output_lines.extend(['+' + line.decode('utf-8') for line in pydiff_matcher.get_lines_from_stream('b', j1, j2)])
-        elif tag == 'replace':
+        if tag == "equal":
+            pydiff_unified_output_lines.extend(
+                [" " + ln.decode("utf-8") for ln in pydiff_matcher.get_lines_from_stream("a", i1, i2)]
+            )
+        elif tag == "delete":
+            pydiff_unified_output_lines.extend(
+                ["-" + ln.decode("utf-8") for ln in pydiff_matcher.get_lines_from_stream("a", i1, i2)]
+            )
+        elif tag == "insert":
+            pydiff_unified_output_lines.extend(
+                ["+" + ln.decode("utf-8") for ln in pydiff_matcher.get_lines_from_stream("b", j1, j2)]
+            )
+        elif tag == "replace":
             # For replace, we need delete old part and insert new part
-            pydiff_unified_output_lines.extend(['-' + line.decode('utf-8') for line in pydiff_matcher.get_lines_from_stream('a', i1, i2)])
-            pydiff_unified_output_lines.extend(['+' + line.decode('utf-8') for line in pydiff_matcher.get_lines_from_stream('b', j1, j2)])
+            pydiff_unified_output_lines.extend(
+                ["-" + ln.decode("utf-8") for ln in pydiff_matcher.get_lines_from_stream("a", i1, i2)]
+            )
+            pydiff_unified_output_lines.extend(
+                ["+" + ln.decode("utf-8") for ln in pydiff_matcher.get_lines_from_stream("b", j1, j2)]
+            )
 
     # Unified diff also needs headers and @@ lines. This manual construction is basic.
     # For a full unified diff comparison, we should use a helper that generates the full format.

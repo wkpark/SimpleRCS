@@ -20,14 +20,12 @@ import io
 import struct
 import threading
 
-import pytest
-
 from simple_rcs.simple_rcs import SimpleRCS
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_rcs() -> SimpleRCS:
     return SimpleRCS(None)
@@ -46,25 +44,26 @@ def _make_binary(seed: int, size: int = 16384) -> bytes:
 # log() with binary content
 # ---------------------------------------------------------------------------
 
+
 def test_log_binary_metadata_fields():
     """log() on binary-only history returns correct ver/author/log fields."""
     rcs = _make_rcs()
     rcs.commit(_make_binary(1), author="alice", log="initial binary")
-    rcs.commit(_make_binary(2), author="bob",   log="updated binary")
+    rcs.commit(_make_binary(2), author="bob", log="updated binary")
     rcs.commit(_make_binary(3), author="carol", log="third binary")
 
     history = rcs.log()
 
     assert len(history) == 3
-    assert history[0]["ver"]    == "1.2"
+    assert history[0]["ver"] == "1.2"
     assert history[0]["author"] == "carol"
-    assert history[0]["log"]    == "third binary"
-    assert history[1]["ver"]    == "1.1"
+    assert history[0]["log"] == "third binary"
+    assert history[1]["ver"] == "1.1"
     assert history[1]["author"] == "bob"
-    assert history[1]["log"]    == "updated binary"
-    assert history[2]["ver"]    == "1.0"
+    assert history[1]["log"] == "updated binary"
+    assert history[2]["ver"] == "1.0"
     assert history[2]["author"] == "alice"
-    assert history[2]["log"]    == "initial binary"
+    assert history[2]["log"] == "initial binary"
 
 
 def test_log_binary_no_text_in_entries():
@@ -81,6 +80,7 @@ def test_log_binary_no_text_in_entries():
 # ---------------------------------------------------------------------------
 # Critical: log() then checkout() — cache bypass
 # ---------------------------------------------------------------------------
+
 
 def test_log_then_checkout_binary():
     """
@@ -106,7 +106,7 @@ def test_log_then_checkout_binary():
 def test_log_then_checkout_text():
     """Same cache bypass test for text content."""
     rcs = _make_rcs()
-    rcs.commit("hello world\n",   author="a", log="v1")
+    rcs.commit("hello world\n", author="a", log="v1")
     rcs.commit("hello updated\n", author="b", log="v2")
 
     rcs.log()  # warms meta-only cache
@@ -139,6 +139,7 @@ def test_checkout_then_log_then_checkout():
 # _load_head(metadata_only=True) — lazy field presence
 # ---------------------------------------------------------------------------
 
+
 def test_load_head_metadata_only_lazy_fields_binary():
     """After _load_head(metadata_only=True), head_info has lazy content fields."""
     rcs = _make_rcs()
@@ -155,9 +156,9 @@ def test_load_head_metadata_only_lazy_fields_binary():
     assert hi.get("ver") == "1.0"
     assert hi.get("is_binary") is True
     assert "content_stream_offset" in hi, "lazy offset missing"
-    assert "content_length" in hi,        "lazy length missing"
-    assert "content_encoding" in hi,      "lazy encoding missing"
-    assert "text" not in hi,              "text must not be decoded in metadata_only mode"
+    assert "content_length" in hi, "lazy length missing"
+    assert "content_encoding" in hi, "lazy encoding missing"
+    assert "text" not in hi, "text must not be decoded in metadata_only mode"
 
 
 def test_load_head_metadata_only_meta_fields_present():
@@ -170,14 +171,15 @@ def test_load_head_metadata_only_meta_fields_present():
     rcs._load_head(metadata_only=True)
 
     hi = rcs.head_info
-    assert hi["ver"]    == "1.0"
+    assert hi["ver"] == "1.0"
     assert hi["author"] == "tester"
-    assert hi["log"]    == "meta test"
+    assert hi["log"] == "meta test"
 
 
 # ---------------------------------------------------------------------------
 # _get_prev_block(metadata_only=True) — lazy fields in prev block
 # ---------------------------------------------------------------------------
+
 
 def test_get_prev_block_metadata_only_lazy_fields():
     """
@@ -223,6 +225,7 @@ def test_get_prev_block_metadata_only_vs_full_meta_match():
 # log(limit=N) and log(reverse=True) through metadata_only path
 # ---------------------------------------------------------------------------
 
+
 def test_log_limit_binary():
     """log(limit=2) returns at most 2 entries even with more history."""
     rcs = _make_rcs()
@@ -252,10 +255,11 @@ def test_log_reverse_binary():
 # Mixed text + binary history
 # ---------------------------------------------------------------------------
 
+
 def test_log_mixed_text_binary_history():
     """log() traverses correctly across text→binary type change boundary."""
     rcs = _make_rcs()
-    rcs.commit("text content\n",  author="a", log="text v1")
+    rcs.commit("text content\n", author="a", log="text v1")
     rcs.commit(_make_binary(200), author="b", log="binary v2")
 
     history = rcs.log()
@@ -271,6 +275,7 @@ def test_log_mixed_text_binary_history():
 # ---------------------------------------------------------------------------
 # base85 binary delta — @@ escaping in scan path
 # ---------------------------------------------------------------------------
+
 
 def test_base85_binary_delta_metadata_only_scan():
     """
@@ -320,6 +325,7 @@ def test_base85_head_and_delta_metadata_only():
 # commit() after log() — cache coherence across write
 # ---------------------------------------------------------------------------
 
+
 def test_log_then_commit_then_checkout():
     """
     log() primes meta-only cache; commit() must bypass it to load full HEAD
@@ -349,17 +355,18 @@ def test_log_then_commit_then_checkout():
 # @ sign in metadata fields — @@ unescaping
 # ---------------------------------------------------------------------------
 
+
 def test_log_at_sign_in_metadata_fields():
     """'@' in author/log stored as '@@' and correctly unescaped in metadata_only parse."""
     rcs = _make_rcs()
     rcs.commit(_make_binary(3001), author="user@domain.com", log="fix: report@office")
-    rcs.commit(_make_binary(3002), author="dev@co.io",       log="update: data@v2")
+    rcs.commit(_make_binary(3002), author="dev@co.io", log="update: data@v2")
 
     history = rcs.log()
     assert history[0]["author"] == "dev@co.io"
-    assert history[0]["log"]    == "update: data@v2"
+    assert history[0]["log"] == "update: data@v2"
     assert history[1]["author"] == "user@domain.com"
-    assert history[1]["log"]    == "fix: report@office"
+    assert history[1]["log"] == "fix: report@office"
 
     # Must also survive the cache-bypass checkout
     assert rcs.checkout("1.0") == _make_binary(3001)
@@ -376,12 +383,13 @@ def test_log_at_sign_via_load_head_metadata_only():
 
     hi = rcs.head_info
     assert hi["author"] == "a@b"
-    assert hi["log"]    == "msg@here"
+    assert hi["log"] == "msg@here"
 
 
 # ---------------------------------------------------------------------------
 # v2 hash / prev_hash fields in log() entries
 # ---------------------------------------------------------------------------
+
 
 def test_log_v2_hash_fields_binary():
     """hash and prev_hash fields are returned in log() entries via metadata_only path."""
@@ -410,6 +418,7 @@ def test_log_v2_hash_fields_binary():
 # Consecutive log() calls — cache reuse
 # ---------------------------------------------------------------------------
 
+
 def test_consecutive_log_calls_idempotent():
     """Second log() call returns identical results without re-scanning."""
     rcs = _make_rcs()
@@ -431,6 +440,7 @@ def test_consecutive_log_calls_idempotent():
 # Single-version log() — no prev block traversal
 # ---------------------------------------------------------------------------
 
+
 def test_log_single_binary_version():
     """log() on a single binary commit returns one entry with no prev traversal."""
     rcs = _make_rcs()
@@ -438,9 +448,9 @@ def test_log_single_binary_version():
 
     history = rcs.log()
     assert len(history) == 1
-    assert history[0]["ver"]    == "1.0"
+    assert history[0]["ver"] == "1.0"
     assert history[0]["author"] == "solo"
-    assert history[0]["log"]    == "only commit"
+    assert history[0]["log"] == "only commit"
 
 
 def test_log_empty_rcs():
@@ -452,6 +462,7 @@ def test_log_empty_rcs():
 # ---------------------------------------------------------------------------
 # _fill() EOF guard — block_end > actual stream length
 # ---------------------------------------------------------------------------
+
 
 def test_fill_eof_guard_no_hang():
     """
@@ -482,8 +493,6 @@ def test_fill_eof_guard_no_hang():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    assert done.wait(timeout=5.0), (
-        "_parse_block_meta_from_stream hung — _fill() EOF guard missing or broken"
-    )
+    assert done.wait(timeout=5.0), "_parse_block_meta_from_stream hung — _fill() EOF guard missing or broken"
     # Result may be complete or partial; must not be an infinite loop
     assert isinstance(result_holder.get("result"), dict)

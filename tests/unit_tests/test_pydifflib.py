@@ -6,8 +6,9 @@ import pytest
 from simple_rcs.pydifflib import StreamSequenceMatcher
 
 
-def create_bytesio(content: str, encoding: str = 'utf-8') -> io.BytesIO:
+def create_bytesio(content: str, encoding: str = "utf-8") -> io.BytesIO:
     return io.BytesIO(content.encode(encoding))
+
 
 # --- Fixtures ---
 @pytest.fixture
@@ -16,6 +17,7 @@ def text_streams():
     b = "Line 1\nLine 2 modified\nLine 3\nLine 4\n"
     return create_bytesio(a), create_bytesio(b)
 
+
 @pytest.fixture
 def binary_streams():
     # 'A' -> 'B' (Replace), 'C' (Equal), 'D' (Insert)
@@ -23,7 +25,9 @@ def binary_streams():
     b = b"BBBBCCCCDDDD"
     return io.BytesIO(a), io.BytesIO(b)
 
+
 # --- Tests for Line Mode (Text) ---
+
 
 def test_line_mode_opcodes(text_streams):
     # This mode is used by SimpleRCS
@@ -40,12 +44,13 @@ def test_line_mode_opcodes(text_streams):
 
     # Note: indices are LINE numbers
     expected = [
-        ('equal', 0, 1, 0, 1),
-        ('replace', 1, 2, 1, 2),
-        ('equal', 2, 3, 2, 3),
-        ('insert', 3, 3, 3, 4),
+        ("equal", 0, 1, 0, 1),
+        ("replace", 1, 2, 1, 2),
+        ("equal", 2, 3, 2, 3),
+        ("insert", 3, 3, 3, 4),
     ]
     assert list(opcodes) == expected
+
 
 def test_compare_with_difflib_text():
     # Verify exact match with standard difflib for text
@@ -74,7 +79,9 @@ def test_compare_with_difflib_text():
 
     assert pydiff_opcodes == std_opcodes
 
+
 # --- Tests for Chunk Mode (Binary) ---
+
 
 def test_chunk_mode_opcodes(binary_streams):
     a_stream, b_stream = binary_streams
@@ -99,18 +106,19 @@ def test_chunk_mode_opcodes(binary_streams):
     # Since they are totally different, it's a full replace.
 
     expected = [
-        ('replace', 0, 4, 0, 4), # AAAA -> BBBB
-        ('equal', 4, 8, 4, 8),   # CCCC == CCCC
-        ('insert', 8, 8, 8, 12),  # Insert DDDD
+        ("replace", 0, 4, 0, 4),  # AAAA -> BBBB
+        ("equal", 4, 8, 4, 8),  # CCCC == CCCC
+        ("insert", 8, 8, 8, 12),  # Insert DDDD
     ]
 
     assert opcodes == expected
+
 
 def test_chunk_mode_refinement():
     # Test that refinement works for partial matches inside a chunk
     # Chunk size 10
     a = b"1234567890"
-    b = b"12345X7890" # '6' -> 'X' at index 5
+    b = b"12345X7890"  # '6' -> 'X' at index 5
 
     stream_a = io.BytesIO(a)
     stream_b = io.BytesIO(b)
@@ -128,11 +136,12 @@ def test_chunk_mode_refinement():
     # equal 6:10 ("7890")
 
     expected = [
-        ('equal', 0, 5, 0, 5),
-        ('replace', 5, 6, 5, 6),
-        ('equal', 6, 10, 6, 10),
+        ("equal", 0, 5, 0, 5),
+        ("replace", 5, 6, 5, 6),
+        ("equal", 6, 10, 6, 10),
     ]
     assert opcodes == expected
+
 
 def test_diff_formats_rcs():
     # Ensure it can still generate RCS format (Text mode)
@@ -143,31 +152,31 @@ def test_diff_formats_rcs():
     stream_b = create_bytesio(content_b)
 
     # Use Line Mode
-    matcher = StreamSequenceMatcher(stream_b, stream_a, chunk_size=None) # New -> Old
+    matcher = StreamSequenceMatcher(stream_b, stream_a, chunk_size=None)  # New -> Old
 
     rcs_diff_lines = []
     # Using SimpleRCS logic
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'equal':
+        if tag == "equal":
             continue
         xlen = i2 - i1
         ylen = j2 - j1
 
-        if tag in ('replace', 'delete'): # Delete from B
-             if xlen > 0:
-                rcs_diff_lines.append(f"d{i1+1} {xlen}")
+        if tag in ("replace", "delete"):  # Delete from B
+            if xlen > 0:
+                rcs_diff_lines.append(f"d{i1 + 1} {xlen}")
 
-        if tag in ('replace', 'insert'): # Add from A
-             if ylen > 0:
-                 xbeg = i1 + 1
-                 add_idx = xbeg + xlen - 1
-                 rcs_diff_lines.append(f"a{add_idx} {ylen}")
+        if tag in ("replace", "insert"):  # Add from A
+            if ylen > 0:
+                xbeg = i1 + 1
+                add_idx = xbeg + xlen - 1
+                rcs_diff_lines.append(f"a{add_idx} {ylen}")
 
-                 # Fetch lines from stream A (b in matcher) using indices
-                 # StreamSequenceMatcher.get_lines_from_stream should support line indices in line mode
-                 raw_lines = matcher.get_lines_from_stream('b', j1, j2)
-                 for line in raw_lines:
-                     rcs_diff_lines.append(line.decode('utf-8').rstrip('\n'))
+                # Fetch lines from stream A (b in matcher) using indices
+                # StreamSequenceMatcher.get_lines_from_stream should support line indices in line mode
+                raw_lines = matcher.get_lines_from_stream("b", j1, j2)
+                for line in raw_lines:
+                    rcs_diff_lines.append(line.decode("utf-8").rstrip("\n"))
 
     rcs_output = "\n".join(rcs_diff_lines)
 
