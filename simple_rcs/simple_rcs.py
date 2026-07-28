@@ -1021,8 +1021,11 @@ class SimpleRCS:
                         i += 1
             commands.append({"cmd": cmd_char, "line": start, "count": count, "payload": payload})
 
-        # Sort commands by line number in descending order
-        commands.sort(key=lambda x: x["line"], reverse=True)
+        # Sort commands by line number in descending order.
+        # Tie-break: 'a' before 'd' at the same line (single-line replace emits
+        # dN 1 + aN 1 at equal line numbers). Inserting first keeps the delete's
+        # target index accurate; deleting first would shift the insert position.
+        commands.sort(key=lambda x: (-x["line"], 0 if x["cmd"] == "a" else 1))
 
         for cmd in commands:
             idx = cmd["line"]
@@ -1544,8 +1547,9 @@ class SimpleRCS:
 
                 commands.append({"cmd": cmd, "start": start, "count": count})
 
-            # Sort descending to handle list mutations
-            commands.sort(key=lambda x: x["start"], reverse=True)
+            # Sort descending to handle list mutations.
+            # Tie-break: 'a' before 'd' at the same line (see _apply_reverse_delta).
+            commands.sort(key=lambda x: (-x["start"], 0 if x["cmd"] == "a" else 1))
 
             for c in commands:
                 idx = c["start"]
