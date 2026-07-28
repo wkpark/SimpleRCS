@@ -848,10 +848,17 @@ class SimpleRCS:
                 if metadata_only:
                     parsed = self._parse_block_meta_from_stream(abs_start, current_start_offset)
                 else:
-                    # Read block from start up to the next block's start
-                    self.stream.seek(abs_start)
+                    # Block bytes are usually already inside `chunk` (block size <= chunk_size).
+                    # Reuse them instead of a redundant seek+read, mirroring _load_head's
+                    # single-pass design. Only fall back to re-reading when the block spans
+                    # beyond this chunk (rare: block larger than chunk_size).
                     length = current_start_offset - abs_start
-                    block_bytes = self.stream.read(length)
+                    end_in_chunk = idx + length
+                    if end_in_chunk <= len(chunk):
+                        block_bytes = chunk[idx:end_in_chunk]
+                    else:
+                        self.stream.seek(abs_start)
+                        block_bytes = self.stream.read(length)
                     parsed = self._parse_block_content_no_regex(block_bytes)
 
                 if parsed:
