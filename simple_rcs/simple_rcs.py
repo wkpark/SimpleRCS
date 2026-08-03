@@ -1,4 +1,3 @@
-import base64
 import difflib
 import hashlib
 import io
@@ -9,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import BinaryIO
 
-from . import pybsdiff
+from . import codec, pybsdiff
 from .pydifflib import StreamSequenceMatcher
 
 logger = logging.getLogger(__name__)
@@ -190,73 +189,6 @@ class SimpleRCS:
             return 2
         return 1
 
-    def _encode_binary(self, data: bytes, encoding: str = "base64") -> bytes:
-        """Encodes binary data to bytes format: <length>;<encoding>,<encoded>"""
-        if encoding == "base85":
-            encoded = base64.b85encode(data)
-            return f"{len(encoded)};base85,".encode("ascii") + encoded
-        elif encoding == "raw":
-            # Raw binary: Length-Based Parsing allows unescaped storage.
-            return f"{len(data)};raw,".encode("ascii") + data
-        else:
-            # Default to base64
-            encoded = base64.b64encode(data)
-            return f"{len(encoded)};base64,".encode("ascii") + encoded
-
-    def _decode_binary(self, text: bytes) -> bytes:
-        """Decodes binary data from bytes format."""
-        # text is bytes here, e.g. b"1024;base64,..."
-        if b";base64," in text:
-            _, encoded = text.split(b";base64,", 1)
-            return base64.b64decode(encoded)
-        elif b";base85," in text:
-            _, encoded = text.split(b";base85,", 1)
-            return base64.b85decode(encoded)
-        elif b";raw," in text:
-            _, raw_data = text.split(b";raw,", 1)
-            return raw_data
-        else:
-            raise ValueError("Invalid binary format")
-
-    def _calculate_block_hash(self, data: dict, prev_hash: str | None = None) -> str:
-        """
-        Calculates hash of the block content using self._hash_algo.
-        IMPORTANT: The hash is calculated based on the LOGICAL content (Full Text),
-        not the stored delta. This ensures the hash remains valid even when
-        HEAD becomes a historical delta block.
-
-        Payload: ver|date|author|log|text|prev_hash
-        """
-        # Ensure we use empty string for None to keep hash stable
-        ver = str(data.get("ver", ""))
-        date = str(data.get("date", ""))
-        author = str(data.get("author", ""))
-        log = str(data.get("log", ""))
-
-        content = data.get("text")  # Can be str or bytes
-        if isinstance(content, bytes):
-            text_bytes = content
-        else:
-            text_str = str(content) if content is not None else ""
-            # Enforce EOL policy for text
-            if text_str and not text_str.endswith("\n"):
-                text_str += "\n"
-            text_bytes = text_str.encode(self.encoding)
-
-        p_hash = prev_hash if prev_hash else ""
-
-        # Construct payload components
-        # ver|date|author|log|
-        meta = f"{ver}|{date}|{author}|{log}|".encode(self.encoding)
-        # |prev_hash
-        tail = f"|{p_hash}".encode(self.encoding)
-
-        hasher = hashlib.new(self._hash_algo)
-        hasher.update(meta)
-        hasher.update(text_bytes)
-        hasher.update(tail)
-        return hasher.hexdigest()
-
     def __del__(self) -> None:
         """Closes the stream if this instance owns it."""
         if self.owns_handle and hasattr(self, "stream") and not self.stream.closed:
@@ -272,10 +204,6 @@ class SimpleRCS:
         content = self.stream.read().decode(self.encoding, errors="replace")
         self.stream.seek(pos)
         return content
-
-    def _escape(self, text: str) -> str:
-        """Escapes '@' to '@@' for storage within @...@ blocks."""
-        return text.replace("@", "@@")
 
     def _unescape(self, text: str) -> str:
         """Unescapes '@@' back to '@'."""
@@ -308,10 +236,10 @@ class SimpleRCS:
                 data["is_delta"] = False
             elif key == "binary":
                 # For regex parser, we decode eagerly since content_str is already str
-                # But _decode_binary expects bytes.
-                # We should re-encode value to bytes or make _decode_binary flexible?
-                # _decode_binary expects bytes. value is str.
-                data["text"] = self._decode_binary(value.encode("ascii"))
+                # But codec.decode_binary expects bytes.
+                # We should re-encode value to bytes or make codec.decode_binary flexible?
+                # codec.decode_binary expects bytes. value is str.
+                data["text"] = codec.decode_binary(value.encode("ascii"))
                 data["is_delta"] = False
                 data["is_binary"] = True
             elif key == "signature":
@@ -479,7 +407,7 @@ class SimpleRCS:
 
             if key_str == "binary":
                 # Binary data is always length-prefixed and decoded.
-                data["text"] = self._decode_binary(value_bytes)
+                data["text"] = codec.decode_binary(value_bytes)
                 data["is_delta"] = False
                 data["is_binary"] = True
             elif key_str == "delta":
@@ -903,7 +831,7 @@ class SimpleRCS:
                 else (old_data if isinstance(old_data, bytes) else old_data.encode(self.encoding))
             )
             patch_data = pybsdiff.diff(new_bytes, old_bytes)  # New -> Old
-            encoded_bytes = self._encode_binary(patch_data, encoding=encoding)
+            encoded_bytes = codec.encode_binary(patch_data, encoding=encoding)
             return encoded_bytes.decode("ascii")
         elif isinstance(new_data, str) and (isinstance(old_data, str) or old_is_stream):
             pass
@@ -991,7 +919,7 @@ class SimpleRCS:
             else:
                 delta_bytes = delta_text
 
-            patch_data = self._decode_binary(delta_bytes)
+            patch_data = codec.decode_binary(delta_bytes)
             return pybsdiff.patch(current_data, patch_data)
 
         # Text Delta (RCS)
@@ -1072,7 +1000,7 @@ class SimpleRCS:
         keys = ["ver", "date", "author", "log"]
         lines = []
         for key in keys:
-            val = self._escape(str(data.get(key, "")))
+            val = codec.escape(str(data.get(key, "")))
             lines.append(f"{key} @{val}@;".encode(self.encoding))
 
         content_val = data.get("text", "")
@@ -1080,24 +1008,24 @@ class SimpleRCS:
         if isinstance(content_val, bytes):
             # Binary Full Text
             # _encode_binary returns bytes: b"len;base64,..."
-            val_bytes = self._encode_binary(content_val, encoding=encoding)
+            val_bytes = codec.encode_binary(content_val, encoding=encoding)
             lines.append(b"binary @" + val_bytes + b"@;")
         else:
             # Text Full Text OR Encoded Delta
             content_key = "delta" if is_delta else "text"
-            val = self._escape(str(content_val))
+            val = codec.escape(str(content_val))
             lines.append(f"{content_key} @{val}@;".encode(self.encoding))
 
         # Add v2 fields if present
         if self._version >= 2:
             if prev_hash:
-                lines.append(f"prev_hash @{self._escape(prev_hash)}@;".encode(self.encoding))
+                lines.append(f"prev_hash @{codec.escape(prev_hash)}@;".encode(self.encoding))
             if current_hash:
-                lines.append(f"hash @{self._escape(current_hash)}@;".encode(self.encoding))
+                lines.append(f"hash @{codec.escape(current_hash)}@;".encode(self.encoding))
 
             if signatures:
                 for sig in signatures:
-                    lines.append(f"signature @{self._escape(sig)}@;".encode(self.encoding))
+                    lines.append(f"signature @{codec.escape(sig)}@;".encode(self.encoding))
 
         return b"\n".join(lines) + b"\n\n"
 
@@ -1154,7 +1082,9 @@ class SimpleRCS:
             signatures = []
             if self._version >= 2:
                 # Calculate Hash (prev_hash is empty for first block)
-                curr_hash = self._calculate_block_hash(block_data, prev_hash="")
+                curr_hash = codec.calculate_block_hash(
+                    block_data, prev_hash="", hash_algo=self._hash_algo, encoding=self.encoding
+                )
 
                 # Sign
                 if signer_callbacks:
@@ -1256,10 +1186,14 @@ class SimpleRCS:
                 new_prev_hash = old_curr_hash
             else:
                 # Fallback: if old block didn't have hash (maybe corrupted v2?), compute it now based on OLD FULL TEXT
-                new_prev_hash = self._calculate_block_hash(head, prev_hash=old_prev_hash)
+                new_prev_hash = codec.calculate_block_hash(
+                    head, prev_hash=old_prev_hash, hash_algo=self._hash_algo, encoding=self.encoding
+                )
 
             # Calculate New Block Hash
-            new_curr_hash = self._calculate_block_hash(new_block_data, prev_hash=new_prev_hash)
+            new_curr_hash = codec.calculate_block_hash(
+                new_block_data, prev_hash=new_prev_hash, hash_algo=self._hash_algo, encoding=self.encoding
+            )
 
             # Sign New Block
             if signer_callbacks:
@@ -1652,7 +1586,9 @@ class SimpleRCS:
         stored_hash = self.head_info.get("hash")
 
         # Re-calculate hash to confirm integrity before signing
-        calculated_hash = self._calculate_block_hash(head_data_for_hash, prev_hash=stored_prev_hash)
+        calculated_hash = codec.calculate_block_hash(
+            head_data_for_hash, prev_hash=stored_prev_hash, hash_algo=self._hash_algo, encoding=self.encoding
+        )
 
         if calculated_hash != stored_hash:
             logger.error(
@@ -1819,7 +1755,9 @@ class SimpleRCS:
             # But wait, curr_block is the metadata block. We should use its flag.
             # 'curr_text' is the Reconstructed Full Text. Its type should match.
 
-            calculated_hash = self._calculate_block_hash(block_data_for_hash, prev_hash=stored_prev_hash)
+            calculated_hash = codec.calculate_block_hash(
+                block_data_for_hash, prev_hash=stored_prev_hash, hash_algo=self._hash_algo, encoding=self.encoding
+            )
 
             if calculated_hash != stored_hash:
                 logger.error(f"calc hash = {calculated_hash} ,stored hash = {stored_hash}")
