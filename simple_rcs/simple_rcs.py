@@ -270,59 +270,6 @@ class SimpleRCS:
         """Escapes '@' to '@@' for storage within @...@ blocks."""
         return text.replace("@", "@@")
 
-    def _unescape(self, text: str) -> str:
-        """Unescapes '@@' back to '@'."""
-        return text.replace("@@", "@")
-
-    def _parse_block_content(self, content_bytes: bytes) -> dict:  # noqa: C901
-        """
-        Parses a raw block bytes into a dictionary.
-        Format: key @value@; ...
-        """
-        content_str = content_bytes.decode(self.encoding, errors="replace")
-        data = {}
-        # Regex matches keys (ver, date, etc.) and values enclosed in @...@
-        # Use re.DOTALL to match newlines within @...@
-        pattern = re.compile(r"(ver|version|date|author|log|text|delta|binary)\s+@((?:[^@]|@@)*)@;", re.DOTALL)
-
-        # Iterate over all matches to build the data dictionary
-        for match in pattern.finditer(content_str):
-            key = match.group(1)
-            value = self._unescape(match.group(2))
-            if key == "version":
-                key = "ver"  # Normalize key
-
-            if key == "delta":
-                data["text"] = value
-                data["is_delta"] = True
-                data["is_binary"] = ";base64," in value or ";base85," in value
-            elif key == "text":
-                data["text"] = value
-                data["is_delta"] = False
-            elif key == "binary":
-                # For regex parser, we decode eagerly since content_str is already str
-                # But _decode_binary expects bytes.
-                # We should re-encode value to bytes or make _decode_binary flexible?
-                # _decode_binary expects bytes. value is str.
-                data["text"] = self._decode_binary(value.encode("ascii"))
-                data["is_delta"] = False
-                data["is_binary"] = True
-            elif key == "signature":
-                if "signatures" not in data:
-                    data["signatures"] = []
-                data["signatures"].append(value)
-            else:
-                data[key] = value
-
-        # Basic validation to ensure it looks like a valid block
-        if "ver" in data:
-            if "is_delta" not in data:
-                data["is_delta"] = False
-            if "is_binary" not in data:
-                data["is_binary"] = False
-            return data
-        return {}
-
     def _parse_block_content_no_regex(self, content_bytes: bytes) -> dict:  # noqa: C901
         """
         Parses a raw block bytes into a dictionary WITHOUT regex.
