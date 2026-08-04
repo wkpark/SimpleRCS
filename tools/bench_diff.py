@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: T201, ANN201
 """
 bench_diff.py — Compare time and memory across all diff matchers.
 
@@ -14,13 +15,11 @@ Usage:
 import argparse
 import importlib
 import io
-import os
 import sys
 import time
 import tracemalloc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Data preparation
@@ -88,16 +87,16 @@ def build_cases() -> list[BenchCase]:
     cases.append(BenchCase("difflib", "difflib (stdlib)", "py", _difflib))
 
     # 2. StreamSequenceMatcher (greedy, line mode)
-    from simple_rcs.pydifflib import StreamSequenceMatcher as _SSM
+    from simple_rcs.pydifflib import StreamSequenceMatcher as _StreamSM
     def _stream_greedy(la, lb):
-        m = _SSM(to_stream(la), to_stream(lb), chunk_size=None)
+        m = _StreamSM(to_stream(la), to_stream(lb), chunk_size=None)
         return list(m.get_opcodes())
     cases.append(BenchCase("stream_greedy", "StreamSequenceMatcher (greedy)", "py", _stream_greedy))
 
     # 3. StreamTextSequenceMatcher (difflib port, stream)
-    from simple_rcs.pydifflib import StreamTextSequenceMatcher as _STSM
+    from simple_rcs.pydifflib import StreamTextSequenceMatcher as _StreamTextSM
     def _stream_text(la, lb):
-        m = _STSM(to_stream(la), to_stream(lb), chunk_size=None)
+        m = _StreamTextSM(to_stream(la), to_stream(lb), chunk_size=None)
         return list(m.get_opcodes())
     cases.append(BenchCase("stream_text", "StreamTextSequenceMatcher (difflib port)", "py", _stream_text))
 
@@ -217,7 +216,8 @@ def print_results(results: list[Result], baseline_ms: float) -> None:
         variant = _VARIANT_BADGE.get(r.case.variant, r.case.variant)
         speedup_str = f"{speedup:.2f}x" if speedup != 1.0 else "1.00x (baseline)"
         print(
-            f"  {r.case.label:<{_COL_W}} {variant:<8} {r.time_ms:>10.1f} {r.peak_kb:>10.1f} {speedup_str:>8} {r.num_opcodes:>8}"
+            f"  {r.case.label:<{_COL_W}} {variant:<8} {r.time_ms:>10.1f} {r.peak_kb:>10.1f}"
+            f" {speedup_str:>8} {r.num_opcodes:>8}"
         )
 
     print(sep)
