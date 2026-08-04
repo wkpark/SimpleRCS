@@ -15,6 +15,13 @@ from .pydifflib import StreamSequenceMatcher
 logger = logging.getLogger(__name__)
 
 
+class SimpleRCSCorruptionError(ValueError):
+    """Raised when historical block data cannot be reconstructed because a
+    delta payload is corrupted (bad base64/base85, truncated BSDIFF patch,
+    malformed RCS delta script, etc.). Subclasses ValueError so existing
+    `except ValueError` callers keep working."""
+
+
 class SimpleRCS:
     """
     A simple, robust, and efficient version control system inspired by RCS.
@@ -1329,7 +1336,13 @@ class SimpleRCS:
                 # prev_block contains the delta to transform curr_text to prev_text
                 # (Strictly speaking, V_prev contains delta to go from V_curr to V_prev)
                 delta = prev_block["text"]
-                curr_content = self._apply_reverse_delta(curr_content, delta)
+                try:
+                    curr_content = self._apply_reverse_delta(curr_content, delta)
+                except ValueError as e:
+                    raise SimpleRCSCorruptionError(
+                        f"Cannot reconstruct version '{prev_block.get('ver')}': "
+                        f"delta data is corrupted ({e})"
+                    ) from e
 
             # Check if this is our target version
             if prev_block["ver"] == ver_num:
@@ -1855,7 +1868,14 @@ class SimpleRCS:
                     curr_text = prev_block["text"]  # Snapshot: Reset text
                 else:
                     delta = prev_block["text"]
-                    curr_text = self._apply_reverse_delta(curr_text, delta)
+                    try:
+                        curr_text = self._apply_reverse_delta(curr_text, delta)
+                    except ValueError as e:
+                        logger.error(
+                            f"Corrupted delta data while reconstructing version "
+                            f"{prev_block.get('ver')}: {e}"
+                        )
+                        return False
 
                 # We need to temporarily peek/calculate prev_block's hash to verify the link NOW?
                 # Or just verify it when we become 'prev_block'.

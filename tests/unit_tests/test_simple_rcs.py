@@ -3,7 +3,7 @@ import tempfile
 
 import pytest
 
-from simple_rcs.simple_rcs import SimpleRCS
+from simple_rcs.simple_rcs import SimpleRCS, SimpleRCSCorruptionError
 
 
 @pytest.fixture
@@ -118,6 +118,33 @@ def test_integrity_verification(rcs):
 
     # Verify should now fail due to hash mismatch
     assert rcs_tampered.verify() is False
+
+
+def test_checkout_raises_on_corrupted_delta():
+    rcs = SimpleRCS()
+    rcs.commit("Line 1\nLine 2\nLine 3\n", author="a", log="v1")
+    rcs.commit("Line 1\nLine 2 modified\nLine 3\n", author="a", log="v2")
+
+    raw = rcs.stream.getvalue()
+    corrupted = raw.replace(b"d2 1\na2 1", b"dX 1\na2 1", 1)
+    assert corrupted != raw, "corruption did not apply to the expected delta command"
+
+    corrupted_rcs = SimpleRCS(corrupted)
+    with pytest.raises(SimpleRCSCorruptionError):
+        corrupted_rcs.checkout("1.0")
+
+
+def test_verify_returns_false_on_corrupted_delta():
+    rcs = SimpleRCS()
+    rcs.commit("Line 1\nLine 2\nLine 3\n", author="a", log="v1")
+    rcs.commit("Line 1\nLine 2 modified\nLine 3\n", author="a", log="v2")
+
+    raw = rcs.stream.getvalue()
+    corrupted = raw.replace(b"d2 1\na2 1", b"dX 1\na2 1", 1)
+    assert corrupted != raw, "corruption did not apply to the expected delta command"
+
+    corrupted_rcs = SimpleRCS(corrupted)
+    assert corrupted_rcs.verify() is False
 
 
 def test_snapshot_chain_integrity(rcs):
