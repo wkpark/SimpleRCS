@@ -25,7 +25,7 @@ def main():
 
     if rcs._version < 2:
         print(f"Error: File '{args.file_path}' is v1 format. Signing is only supported for v2.")
-        print("Please migrate the file to v2 first using 'srcs_migrate.py'.")
+        print("The v1-to-v2 migration tool was removed; recover it from git history if needed.")
         sys.exit(1)
 
     signers = []
