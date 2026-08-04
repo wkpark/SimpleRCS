@@ -172,6 +172,28 @@ def test_verify_handles_verifier_callback_exception(caplog):
     assert any("Signature verification error" in r.message for r in caplog.records)
 
 
+def test_diff_between_versions(rcs):
+    rcs.commit("Line 1\nLine 2\nLine 3\n", author="a", log="v1")
+    rcs.commit("Line 1\nLine 2 modified\nLine 3\nLine 4\n", author="a", log="v2")
+
+    unified = rcs.diff("1.0", "1.1")
+    assert "-Line 2\n" in unified
+    assert "+Line 2 modified\n" in unified
+    assert "+Line 4\n" in unified
+    assert "Version 1.0" in unified
+    assert "Version 1.1" in unified
+
+    # Same version -> no changes reported
+    assert rcs.diff("1.1", "1.1") == ""
+
+
+def test_diff_binary_versions(rcs):
+    rcs.commit(b"\x00\x01\x02", author="a", log="bin v1")
+    rcs.commit(b"\x00\xff\x02", author="a", log="bin v2")
+
+    assert rcs.diff("1.0", "1.1") == "Binary files differ"
+
+
 def test_snapshot_chain_integrity(rcs):
     # Test that verify() still works with snapshots breaking the delta chain logic
     rcs.commit("V1")
