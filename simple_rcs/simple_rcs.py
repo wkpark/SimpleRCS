@@ -1313,12 +1313,7 @@ class SimpleRCS:
         """
         self._load_head()  # Ensure HEAD info is up-to-date
 
-        # Define default_content safely at the start of the method
-        default_content = b""
-        if self.head_info and self.head_info.get("is_binary"):
-            default_content = b""
-        else:
-            default_content = ""
+        default_content = b"" if self.head_info and self.head_info.get("is_binary") else ""
 
         if not self.head_info:
             return default_content  # Handle initial empty state
