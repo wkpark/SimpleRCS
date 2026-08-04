@@ -147,6 +147,19 @@ def test_verify_returns_false_on_corrupted_delta():
     assert corrupted_rcs.verify() is False
 
 
+def test_commit_raises_on_malformed_head_version():
+    rcs = SimpleRCS()
+    rcs.commit("Line 1\n", author="a", log="v1")
+
+    raw = rcs.stream.getvalue()
+    corrupted = raw.replace(b"ver @1.0@;", b"ver @not-a-version@;", 1)
+    assert corrupted != raw, "corruption did not apply to the version string"
+
+    corrupted_rcs = SimpleRCS(corrupted)
+    with pytest.raises(SimpleRCSCorruptionError):
+        corrupted_rcs.commit("Line 1\nLine 2\n", author="a", log="v2")
+
+
 def test_snapshot_chain_integrity(rcs):
     # Test that verify() still works with snapshots breaking the delta chain logic
     rcs.commit("V1")

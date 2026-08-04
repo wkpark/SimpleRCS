@@ -1232,13 +1232,16 @@ class SimpleRCS:
         last_ver_str = head.get("ver", "0.0")
         try:
             parts = [int(p) for p in last_ver_str.split(".")]
-            if parts:
-                parts[-1] += 1
-                new_ver = ".".join(map(str, parts))
-            else:
-                new_ver = "1.0"
-        except ValueError:
-            new_ver = "1.0"  # Fallback if version is malformed
+            parts[-1] += 1
+            new_ver = ".".join(map(str, parts))
+        except ValueError as e:
+            # Do NOT fall back to a fixed "1.0" here: HEAD's version string is
+            # unparseable, meaning the file is already corrupted. Silently
+            # coining "1.0" could collide with an existing version elsewhere
+            # in the history, making later checkout("1.0") ambiguous.
+            raise SimpleRCSCorruptionError(
+                f"Cannot commit: HEAD version string '{last_ver_str}' is malformed"
+            ) from e
 
         new_block_data = {"ver": new_ver, "date": now, "author": author, "log": log, "text": content}
         if is_binary_content:
