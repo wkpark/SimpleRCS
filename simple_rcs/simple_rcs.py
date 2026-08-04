@@ -871,6 +871,12 @@ class SimpleRCS:
                 if parsed:
                     parsed["start"] = abs_start
                     parsed["end"] = current_start_offset
+                    if self._version < 2:
+                        # v1 has no 'delta' keyword: every block stores its content
+                        # under 'text', and only HEAD (never returned here, since this
+                        # method only finds the block *preceding* current_start_offset)
+                        # holds full text. Every other v1 block is a reverse delta.
+                        parsed["is_delta"] = True
                     return parsed
 
         return None
