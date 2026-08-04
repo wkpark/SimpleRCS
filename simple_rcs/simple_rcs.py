@@ -1288,9 +1288,10 @@ class SimpleRCS:
             encoding=encoding,
         )
 
+        # Single write() call: two separate writes would leave the file with an
+        # overwritten old HEAD but no new HEAD if the process dies in between.
         self.stream.seek(self.head_info["start"])
-        self.stream.write(old_block_bytes)
-        self.stream.write(new_block_bytes)
+        self.stream.write(old_block_bytes + new_block_bytes)
         self.stream.truncate()  # Crucial: remove any leftover
 
         if isinstance(self.stream, io.BytesIO):
