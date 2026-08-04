@@ -1,12 +1,13 @@
+#!/usr/bin/env python3
+# ruff: noqa: T201, ANN201
 import argparse
 import difflib
+import importlib
 import io
 import os
 import sys
 import time
 from pathlib import Path
-
-# ruff: noqa: T201, ANN201
 
 from simple_rcs.myersdiff import MyersSequenceMatcher
 from simple_rcs.pydifflib import StreamSequenceMatcher
@@ -27,7 +28,8 @@ def resolve_rcs_path(target_path: Path, explicit_rcs_path: str = None, srcs_dir_
     srcs_dir = Path(srcs_dir_name)
     return srcs_dir / rcs_filename
 
-def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str], fromfile: str, tofile: str, context: int = 3):
+def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
+                               fromfile: str, tofile: str, context: int = 3):
     """
     Generates and prints a unified diff using a given matcher with proper context.
     Works with any matcher providing get_opcodes().
@@ -116,7 +118,9 @@ def main() -> None:
 
     parser.add_argument("-r", "--revision", help="Revision(s) to compare. Format: '1.1' (vs HEAD) or '1.1:1.2'")
     parser.add_argument("--srcs-dir", default=".srcs", help="Directory to store .srcs files (default: .srcs)")
-    parser.add_argument("--engine", default="difflib", choices=["difflib", "pydifflib", "myers"], help="Diff engine to use")
+    parser.add_argument("--engine", default="difflib",
+        choices=["difflib", "pydifflib", "myers", "ses", "dmp"],
+        help="Diff engine to use (ses/dmp are the Cython Myers variants)")
 
     args = parser.parse_args()
 
@@ -213,7 +217,6 @@ def main() -> None:
         matcher = StreamSequenceMatcher(stream_a, stream_b, chunk_size=None)
         lines_a = content_a.splitlines(keepends=True)
         lines_b = content_b.splitlines(keepends=True)
-        opcodes = list(matcher.get_opcodes())
         print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
 
     elif args.engine == "myers":
@@ -221,7 +224,18 @@ def main() -> None:
         lines_a = content_a.splitlines(keepends=True)
         lines_b = content_b.splitlines(keepends=True)
         matcher = MyersSequenceMatcher(None, lines_a, lines_b)
-        opcodes = list(matcher.get_opcodes())
+        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
+
+    elif args.engine in ("ses", "dmp"):
+        module_name = f"simple_rcs._myersdiff_{args.engine}"
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            print(f"Error: Cython module '{module_name}' not available (build the extension first).", file=sys.stderr)
+            sys.exit(1)
+        lines_a = content_a.splitlines(keepends=True)
+        lines_b = content_b.splitlines(keepends=True)
+        matcher = module.MyersSequenceMatcher(None, lines_a, lines_b)
         print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
     end_time = time.perf_counter()
     print(f"\nTime taken: {end_time - start_time:.4f}s", file=sys.stderr)
