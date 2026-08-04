@@ -1753,6 +1753,7 @@ class SimpleRCS:
             return False, None
 
         for sig_entry in signatures:
+            signer_id = None
             try:
                 parts = sig_entry.split("|")
                 if len(parts) < 3:
@@ -1766,7 +1767,8 @@ class SimpleRCS:
 
                 if verifier_callback(signer_id, msg, sig_val):
                     return True, signer_id
-            except Exception as _e:
+            except Exception as e:
+                logger.warning(f"Signature verification failed for entry {sig_entry!r}: {e}")
                 return False, signer_id
 
         return False, None
@@ -1857,7 +1859,10 @@ class SimpleRCS:
                         if not valid_sig:
                             logger.error(f"Invalid signature at version {curr_block.get('ver')} by {signer_id}")
                             return False
-                    except Exception:
+                    except Exception as e:
+                        logger.error(
+                            f"Signature verification error at version {curr_block.get('ver')}: {e}"
+                        )
                         return False
 
             # 3. Move to Previous Block

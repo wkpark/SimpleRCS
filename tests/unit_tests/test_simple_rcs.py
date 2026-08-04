@@ -160,6 +160,18 @@ def test_commit_raises_on_malformed_head_version():
         corrupted_rcs.commit("Line 1\nLine 2\n", author="a", log="v2")
 
 
+def test_verify_handles_verifier_callback_exception(caplog):
+    def _raising_verifier(_signer_id, _msg, _sig_val):
+        raise RuntimeError("boom")
+
+    rcs = SimpleRCS()
+    rcs.commit("Line 1\n", author="a", log="v1")
+    rcs.sign_head(signer_callbacks=[lambda msg: ("signer1", "fake-sig-for-" + msg)])
+
+    assert rcs.verify(verifier_callbacks=[_raising_verifier]) is False
+    assert any("Signature verification error" in r.message for r in caplog.records)
+
+
 def test_snapshot_chain_integrity(rcs):
     # Test that verify() still works with snapshots breaking the delta chain logic
     rcs.commit("V1")
