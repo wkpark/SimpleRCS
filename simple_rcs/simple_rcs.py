@@ -213,6 +213,11 @@ class SimpleRCS:
         """
         Parses a raw block bytes into a dictionary.
         Format: key @value@; ...
+
+        Not used on the hot path (see _parse_block_content_no_regex, which all
+        callers use instead) -- kept intentionally as a simpler, more readable
+        reference implementation of the block format. Covered by
+        test_parse_block_content_matches_no_regex to catch drift between the two.
         """
         content_str = content_bytes.decode(self.encoding, errors="replace")
         data = {}

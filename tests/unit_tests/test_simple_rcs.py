@@ -194,6 +194,44 @@ def test_diff_binary_versions(rcs):
     assert rcs.diff("1.0", "1.1") == "Binary files differ"
 
 
+def test_parse_block_content_matches_no_regex():
+    """_parse_block_content (regex) is an unused-at-runtime reference implementation
+    kept for readability; this pins it to stay behaviorally identical to
+    _parse_block_content_no_regex (the one every caller actually uses)."""
+    rcs = SimpleRCS()
+    rcs.commit("Line 1\nLine 2\n", author="a", log="text v1")
+    rcs.commit("Line 1\nLine 2 modified\nLine 3\n", author="a", log="text v2")
+    rcs.commit(b"\x00\x01\x02\xff\xfe", author="a", log="binary v3")
+
+    raw = rcs.stream.getvalue()
+
+    # head_info reflects whatever _load_head() last computed, which commit()
+    # calls at its *start* (pre-write) -- force a rescan to see the real HEAD.
+    rcs._load_head(force=True)
+
+    offsets = []
+    block = rcs.head_info
+    offsets.append((block["start"], block["end"]))
+    while True:
+        prev = rcs._get_prev_block(block["start"])
+        if not prev:
+            break
+        offsets.append((prev["start"], prev["end"]))
+        block = prev
+
+    assert len(offsets) == 3, "expected to walk all 3 committed blocks"
+
+    for start, end in offsets:
+        block_bytes = raw[start:end]
+        regex_result = rcs._parse_block_content(block_bytes)
+        no_regex_result = rcs._parse_block_content_no_regex(block_bytes)
+        for key in ("ver", "date", "author", "log", "text", "is_delta", "is_binary"):
+            assert regex_result.get(key) == no_regex_result.get(key), (
+                f"'{key}' mismatch at ver={regex_result.get('ver')}: "
+                f"regex={regex_result.get(key)!r} no_regex={no_regex_result.get(key)!r}"
+            )
+
+
 def test_snapshot_chain_integrity(rcs):
     # Test that verify() still works with snapshots breaking the delta chain logic
     rcs.commit("V1")
