@@ -146,30 +146,20 @@ class SimpleRCS:
         else:
             raise ValueError("Invalid input type. Expected file path, string, bytes, or file-like object.")
 
-        # Absolute offset where the first commit block begins: 0 for v1 (no
-        # header), or the byte length of the v2 magic-header line. Computed
-        # once here (version doesn't change over the object's lifetime, same
-        # assumption `self._version` already relies on); used by
-        # `_is_block_boundary` to recognize the very first block, which has
-        # no preceding blank line to check.
-        self._data_start: int = self._compute_data_start()
+        # self._data_start (absolute offset where the first commit block
+        # begins: 0 for v1, or the v2 header's byte length) was already set
+        # above by whichever of `_write_v2_header`/`_detect_format_version`
+        # ran (every branch calls exactly one) -- both already read/write
+        # the header line, so they set it for free instead of this needing
+        # a separate re-read. Used by `_is_block_boundary` to recognize the
+        # very first block, which has no preceding blank line to check.
 
         self.head_info: dict | None = None
         self._head_cache_size: int = -1  # stream size at last successful _load_head scan
         self._head_meta_only: bool = False  # True when cached head_info has no 'text'
         self._load_head()
 
-    def _compute_data_start(self) -> int:
-        """Byte offset where block data begins: 0 for v1, or past the v2 header line."""
-        if self._version < 2:
-            return 0
-        pos = self.stream.tell()
-        self.stream.seek(0)
-        header_line = self.stream.readline()
-        self.stream.seek(pos)
-        return len(header_line)
-
-    def _is_block_boundary(self, abs_start: int) -> bool:
+    def _is_block_boundary(self, abs_start: int, buf: bytes | None = None, buf_origin: int = 0) -> bool:
         """True if `abs_start` is a genuine block-start offset, not a
         coincidental "ver @"/"version @" match inside escaped block content.
 
@@ -182,30 +172,73 @@ class SimpleRCS:
         it does not protect that 5/9-byte sequence from occurring inside an
         escaped field value (e.g. a log message or page body containing
         "whoever @admin" or "changelog: version @2"). Requiring the blank
-        line immediately before a candidate rules out that whole class of
-        false positives: reproducing it *and* fooling the parser afterward
-        would require content that imitates SimpleRCS's own block framing
-        verbatim, not just a stray "ver @"/"version @" substring.
+        line immediately before a candidate rules out that class of false
+        positives on its own.
+
+        This check alone is NOT sufficient, though: `codec.escape` doesn't
+        escape newlines either, so ordinary content containing a literal
+        blank line immediately followed by "ver @"/"version @" (e.g. wiki
+        prose like "...\\n\\nversion @2.0 release notes...") still passes
+        it. Callers close that gap themselves by re-scanning further left
+        whenever parsing what looked like a valid boundary still fails —
+        see `_scan_for_block`. Only content that reproduces *both* the
+        blank line *and* a value that itself parses as a well-formed block
+        can still fool the pair together, which is a categorically
+        narrower coincidence than a bare substring match.
+
+        `buf`/`buf_origin`, if given, let the caller's already-read window
+        (e.g. `_load_head`'s `search_buf`) serve the 2-byte lookback
+        directly, avoiding a stream seek+read for the common case where
+        those bytes are already in memory.
         """
         if abs_start == self._data_start:
             return True
         if abs_start < 2:
             return False
+        if buf is not None:
+            rel = abs_start - 2 - buf_origin
+            if 0 <= rel and rel + 2 <= len(buf):
+                return buf[rel : rel + 2] == b"\n\n"
         pos = self.stream.tell()
         self.stream.seek(abs_start - 2)
         is_boundary = self.stream.read(2) == b"\n\n"
         self.stream.seek(pos)
         return is_boundary
 
+    def _scan_for_block(self, buf: bytes, limit: int, buf_origin: int) -> int:
+        """Rightmost offset in `buf[:limit]` (`buf_origin` = the stream
+        offset `buf[0]` corresponds to) where "ver @"/"version @" marks a
+        genuine block boundary per `_is_block_boundary`, or -1 if none.
+
+        Does not attempt to parse. A candidate that passes the boundary
+        check can still fail to parse (see `_is_block_boundary`'s
+        docstring for why) — callers must re-call with `limit` shrunk to
+        the returned idx when that happens, to keep looking left instead
+        of treating a merely-structurally-plausible offset as the answer.
+        """
+        while True:
+            idx = max(buf.rfind(b"ver @", 0, limit), buf.rfind(b"version @", 0, limit))
+            if idx == -1 or self._is_block_boundary(buf_origin + idx, buf, buf_origin):
+                return idx
+            limit = idx
+
     def _write_v2_header(self) -> None:
-        """Writes the v2 magic header with the chosen hash algorithm."""
+        """Writes the v2 magic header with the chosen hash algorithm.
+
+        Also sets `self._data_start` to the header's byte length: we just
+        wrote it, so there's nothing to re-read to learn that.
+        """
         header = f"# SimpleRCS v2.0; hash_algo={self._hash_algo}; encoding={self.encoding};\n"
-        self.stream.write(header.encode(self.encoding))
+        header_bytes = header.encode(self.encoding)
+        self.stream.write(header_bytes)
+        self._data_start = len(header_bytes)
 
     def _detect_format_version(self) -> int:
         """
         Detects format version and hash algorithm from the stream header.
-        Updates self._hash_algo if found.
+        Updates self._hash_algo and self._data_start (0 for v1, the header's
+        byte length for v2 — reusing the readline() below rather than
+        re-reading it separately just to learn that length).
         """
         pos = self.stream.tell()
         self.stream.seek(0)
@@ -214,6 +247,7 @@ class SimpleRCS:
             header_bytes = self.stream.readline()
             header = header_bytes.decode(self.encoding).strip()
         except UnicodeDecodeError:
+            header_bytes = b""
             header = ""
         finally:
             self.stream.seek(pos)  # Restore position
@@ -232,7 +266,9 @@ class SimpleRCS:
             match_encoding = re.search(r"encoding=([^;]+)", header)
             if match_encoding:
                 self.encoding = match_encoding.group(1).strip()
+            self._data_start = len(header_bytes)
             return 2
+        self._data_start = 0
         return 1
 
     def __del__(self) -> None:
@@ -598,12 +634,23 @@ class SimpleRCS:
                         pos = at + 1
                         break
                 value = b"".join(val_parts).decode(self.encoding, errors="replace")
-                # skip optional whitespace + ';'
+                # skip whitespace, then require ';'. A real field always has
+                # one (see _format_block) -- unlike _parse_block_content_no_regex,
+                # this loop used to store the key/value anyway when it was
+                # missing, so a false-positive scan match that failed this
+                # same check in the other parser could still "succeed" here,
+                # producing a garbage-but-accepted entry (e.g. a phantom
+                # {'ver': '', 'author': None, ...} row in log()) instead of
+                # failing the same way. Missing ';' means malformed/truncated
+                # data either way -- discard what we collected and stop,
+                # matching the no-regex parser's stricter behavior.
                 _ensure(2, pos)
                 while pos < len(buf) and buf[pos] in b" \t\r\n":
                     pos += 1
                 if pos < len(buf) and buf[pos] == ord(";"):
                     pos += 1
+                else:
+                    break
 
                 key_str = key_bytes.decode()
                 if key_str == "version":
@@ -763,49 +810,44 @@ class SimpleRCS:
                 # no need to accumulate chunks for head_bytes assembly.
                 collected.append(chunk)
 
-            # Search for the rightmost "ver @" in this chunk + OVERLAP bytes of the
-            # chunk to its right (to catch patterns split across a boundary).
+            # Search for the rightmost genuine block boundary in this chunk +
+            # OVERLAP bytes of the chunk to its right (to catch patterns
+            # split across a boundary).
             search_buf = chunk + tail_prefix
             search_limit = len(search_buf)
 
             while True:
-                idx = max(
-                    search_buf.rfind(b"ver @", 0, search_limit),
-                    search_buf.rfind(b"version @", 0, search_limit),
-                )
+                idx = self._scan_for_block(search_buf, search_limit, pos)
                 if idx == -1:
                     break
                 abs_start = pos + idx
-                if self._is_block_boundary(abs_start):
-                    if metadata_only:
-                        parsed = self._parse_block_meta_from_stream(abs_start, file_size)
-                    elif idx < len(chunk):
-                        # Assemble HEAD block from already-read chunks — no second seek+read.
-                        # collected[-1] is the current (leftmost) chunk; collected[0] is the
-                        # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
-                        head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
-                        parsed = self._parse_block_content_no_regex(head_bytes)
-                    else:
-                        # Match falls inside `tail_prefix` (spans into a chunk
-                        # read on a previous, further-right iteration) — rare;
-                        # re-read directly rather than threading that chunk
-                        # through too.
-                        self.stream.seek(abs_start)
-                        parsed = self._parse_block_content_no_regex(self.stream.read(file_size - abs_start))
-                    if parsed:
-                        parsed["start"] = abs_start
-                        parsed["end"] = file_size
-                        self.head_info = parsed
-                        self._head_cache_size = file_size
-                        self._head_meta_only = metadata_only
-                        return
-                    # Real boundary but parse failed (corrupted data) — give
-                    # up on this buffer, same as before; move to an earlier
-                    # chunk.
-                    break
-                # False positive inside escaped content (see
-                # _is_block_boundary) — keep looking further left within
-                # this same buffer before falling back to an earlier chunk.
+                if metadata_only:
+                    parsed = self._parse_block_meta_from_stream(abs_start, file_size)
+                elif idx < len(chunk):
+                    # Assemble HEAD block from already-read chunks — no second seek+read.
+                    # collected[-1] is the current (leftmost) chunk; collected[0] is the
+                    # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
+                    head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
+                    parsed = self._parse_block_content_no_regex(head_bytes)
+                else:
+                    # Match falls inside `tail_prefix` (spans into a chunk
+                    # read on a previous, further-right iteration) — rare;
+                    # re-read directly rather than threading that chunk
+                    # through too.
+                    self.stream.seek(abs_start)
+                    parsed = self._parse_block_content_no_regex(self.stream.read(file_size - abs_start))
+                if parsed:
+                    parsed["start"] = abs_start
+                    parsed["end"] = file_size
+                    self.head_info = parsed
+                    self._head_cache_size = file_size
+                    self._head_meta_only = metadata_only
+                    return
+                # `idx` passed the structural boundary check but still
+                # didn't parse — either genuine corruption, or yet another
+                # coincidental blank-line + marker match (see
+                # _is_block_boundary). Keep looking further left within
+                # this same buffer rather than assuming the worst.
                 search_limit = idx
 
             tail_prefix = chunk[:OVERLAP]
@@ -844,23 +886,19 @@ class SimpleRCS:
             # into `chunk`.
             limit_in_chunk = current_start_offset - scan_pos
 
-            # Search for block start (`ver @` or `version @`) in `chunk` up to `limit_in_chunk`,
-            # retrying further left within this same buffer whenever a candidate
-            # turns out to be a false positive inside escaped content (see
-            # _is_block_boundary) before falling back to an earlier chunk.
+            # Search for a genuine block boundary (`ver @`/`version @`) in
+            # `chunk` up to `limit_in_chunk`, retrying further left within
+            # this same buffer whenever a candidate doesn't pan out — either
+            # it's a false positive (see _is_block_boundary) or it passed
+            # that check but still failed to parse — before falling back to
+            # an earlier chunk.
             search_limit = limit_in_chunk
             while True:
-                idx_v = chunk.rfind(b"ver @", 0, search_limit)
-                idx_version = chunk.rfind(b"version @", 0, search_limit)
-                idx = max(idx_v, idx_version)
+                idx = self._scan_for_block(chunk, search_limit, scan_pos)
                 if idx == -1:
                     break
 
                 abs_start = scan_pos + idx  # Absolute offset of previous block's start
-                if not self._is_block_boundary(abs_start):
-                    search_limit = idx
-                    continue
-
                 if metadata_only:
                     parsed = self._parse_block_meta_from_stream(abs_start, current_start_offset)
                 else:
@@ -887,9 +925,10 @@ class SimpleRCS:
                         # holds full text. Every other v1 block is a reverse delta.
                         parsed["is_delta"] = True
                     return parsed
-                # Real boundary but parse failed (corrupted data) — give up on
-                # this buffer, same as before; move to an earlier chunk.
-                break
+                # `idx` passed the structural boundary check but still didn't
+                # parse — keep looking further left within this same buffer
+                # (see the matching comment in _load_head).
+                search_limit = idx
 
         return None
 
