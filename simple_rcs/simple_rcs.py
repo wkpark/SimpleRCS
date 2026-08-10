@@ -222,6 +222,38 @@ class SimpleRCS:
                 return idx
             limit = idx
 
+    def _resolve_block(self, abs_start: int, block_end: int, metadata_only: bool, get_content_bytes) -> dict:
+        """Parses the block candidate at `abs_start` (already confirmed a
+        genuine boundary by `_scan_for_block`/`_is_block_boundary`), or
+        returns `{}` if it doesn't actually parse — a structurally
+        boundary-shaped offset can still fail to parse (see
+        `_is_block_boundary`'s docstring for why); callers must treat that
+        the same as a rejected candidate and keep scanning left, not as a
+        genuine (if malformed) block.
+
+        Shared by `_load_head`/`_get_prev_block` so the two don't drift
+        into different rejection behavior, as they briefly did before this
+        was factored out.
+
+        `get_content_bytes`, a zero-arg callable, is only invoked (lazily)
+        for the `metadata_only=False` path once the cheap metadata
+        pre-check below has already passed — each caller supplies its own
+        cheapest way to get those bytes (in-memory chunk reuse vs a fresh
+        seek+read), matching how they already assemble content elsewhere.
+        """
+        if metadata_only:
+            return self._parse_block_meta_from_stream(abs_start, block_end)
+        # Cheap pre-check via the streaming metadata parser before paying
+        # for the full assembly: content with several "blank line + marker"
+        # collisions (see _is_block_boundary) can make the caller's retry
+        # loop try many candidates, and _parse_block_meta_from_stream reads
+        # incrementally and fails fast on a rejected one, instead of the
+        # O(bytes from abs_start to block_end) that eagerly building the
+        # full content bytes for every attempt would cost.
+        if not self._parse_block_meta_from_stream(abs_start, block_end):
+            return {}
+        return self._parse_block_content_no_regex(get_content_bytes())
+
     def _write_v2_header(self) -> None:
         """Writes the v2 magic header with the chosen hash algorithm.
 
@@ -672,12 +704,7 @@ class SimpleRCS:
                         enc_str = peek[semi + 1 : comma].decode("ascii", errors="replace")
                         header_len = comma + 1
                         content_abs = buf_origin + pos + header_len
-                        data["content_stream_offset"] = content_abs
-                        data["content_length"] = data_len
-                        data["content_encoding"] = enc_str
-                        data["is_binary"] = True
-                        data["is_delta"] = False
-                        # seek past content + closing '@' + ';'
+                        # seek past content + closing '@'
                         skip_to = content_abs + data_len + 1  # +1 = closing '@'
                         self.stream.seek(skip_to)
                         stream_cursor = skip_to
@@ -685,23 +712,36 @@ class SimpleRCS:
                         pos = 0
                         buf_origin = skip_to
                         _fill()
-                        # skip ';'
+                        # skip whitespace, then require ';' -- and only store
+                        # this field once we've confirmed it, same as the
+                        # _meta_kw branch above and _parse_block_content_no_regex:
+                        # a missing terminator means malformed/truncated data
+                        # either way, so nothing from this field (not even the
+                        # seek-skip's byte range) should end up in `data`.
                         while pos < len(buf) and buf[pos] in b" \t\r\n":
                             pos += 1
                         if pos < len(buf) and buf[pos] == ord(";"):
                             pos += 1
+                            data["content_stream_offset"] = content_abs
+                            data["content_length"] = data_len
+                            data["content_encoding"] = enc_str
+                            data["is_binary"] = True
+                            data["is_delta"] = False
+                        else:
+                            break
 
             else:  # delta / text — scan for unescaped '@' then ';', no collection
-                data["is_delta"] = key_bytes == b"delta"
+                is_delta_key = key_bytes == b"delta"
                 # Peek to detect binary (length-based) delta: starts with "N;encoding,"
                 use_seek_skip = False
-                if key_bytes == b"delta":
+                is_binary_val = False
+                if is_delta_key:
                     _ensure(50, pos)
                     peek = buf[pos : pos + 50]
                     semi = peek.find(b";")
                     comma = peek.find(b",", semi) if semi != -1 else -1
                     is_len_based = semi != -1 and peek[:semi].isdigit() and comma != -1
-                    data["is_binary"] = is_len_based
+                    is_binary_val = is_len_based
                     if is_len_based:
                         enc_str = peek[semi + 1 : comma].decode("ascii", errors="replace")
                         # base64 charset has no '@', so _escape is a no-op and
@@ -709,8 +749,6 @@ class SimpleRCS:
                         # base85/raw can contain '@' which _escape turns into '@@',
                         # making the stored length > N, so seek skip would overshoot.
                         use_seek_skip = enc_str == "base64"
-                else:
-                    data["is_binary"] = False
 
                 if use_seek_skip:
                     # base64 binary delta: skip N bytes of encoded content via seek
@@ -729,6 +767,8 @@ class SimpleRCS:
                         pos += 1
                     if pos < len(buf) and buf[pos] == ord(";"):
                         pos += 1
+                    else:
+                        break
                 else:
                     # text delta or base85 delta: scan for unescaped '@'.
                     # buf grows monotonically up to O(delta_size) — no seek available
@@ -748,12 +788,20 @@ class SimpleRCS:
                         else:
                             pos = at + 1  # closing '@'
                             break
-                    # skip ';'
+                    # skip whitespace, then require ';' -- same reasoning as
+                    # the seek-skip branch above and the _meta_kw branch
+                    # earlier: don't record is_delta/is_binary for a field
+                    # that was never properly terminated.
                     _ensure(2, pos)
                     while pos < len(buf) and buf[pos] in b" \t\r\n":
                         pos += 1
                     if pos < len(buf) and buf[pos] == ord(";"):
                         pos += 1
+                    else:
+                        break
+
+                data["is_delta"] = is_delta_key
+                data["is_binary"] = is_binary_val
 
         if "ver" in data:
             data.setdefault("is_delta", False)
@@ -821,21 +869,21 @@ class SimpleRCS:
                 if idx == -1:
                     break
                 abs_start = pos + idx
-                if metadata_only:
-                    parsed = self._parse_block_meta_from_stream(abs_start, file_size)
-                elif idx < len(chunk):
-                    # Assemble HEAD block from already-read chunks — no second seek+read.
-                    # collected[-1] is the current (leftmost) chunk; collected[0] is the
-                    # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
-                    head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
-                    parsed = self._parse_block_content_no_regex(head_bytes)
-                else:
+
+                def _content_bytes(idx=idx, abs_start=abs_start, chunk=chunk):
+                    if idx < len(chunk):
+                        # Assemble HEAD block from already-read chunks — no second seek+read.
+                        # collected[-1] is the current (leftmost) chunk; collected[0] is the
+                        # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
+                        return chunk[idx:] + b"".join(reversed(collected[:-1]))
                     # Match falls inside `tail_prefix` (spans into a chunk
                     # read on a previous, further-right iteration) — rare;
                     # re-read directly rather than threading that chunk
                     # through too.
                     self.stream.seek(abs_start)
-                    parsed = self._parse_block_content_no_regex(self.stream.read(file_size - abs_start))
+                    return self.stream.read(file_size - abs_start)
+
+                parsed = self._resolve_block(abs_start, file_size, metadata_only, _content_bytes)
                 if parsed:
                     parsed["start"] = abs_start
                     parsed["end"] = file_size
@@ -899,9 +947,8 @@ class SimpleRCS:
                     break
 
                 abs_start = scan_pos + idx  # Absolute offset of previous block's start
-                if metadata_only:
-                    parsed = self._parse_block_meta_from_stream(abs_start, current_start_offset)
-                else:
+
+                def _content_bytes(idx=idx, abs_start=abs_start, chunk=chunk):
                     # Block bytes are usually already inside `chunk` (block size <= chunk_size).
                     # Reuse them instead of a redundant seek+read, mirroring _load_head's
                     # single-pass design. Only fall back to re-reading when the block spans
@@ -909,12 +956,11 @@ class SimpleRCS:
                     length = current_start_offset - abs_start
                     end_in_chunk = idx + length
                     if end_in_chunk <= len(chunk):
-                        block_bytes = chunk[idx:end_in_chunk]
-                    else:
-                        self.stream.seek(abs_start)
-                        block_bytes = self.stream.read(length)
-                    parsed = self._parse_block_content_no_regex(block_bytes)
+                        return chunk[idx:end_in_chunk]
+                    self.stream.seek(abs_start)
+                    return self.stream.read(length)
 
+                parsed = self._resolve_block(abs_start, current_start_offset, metadata_only, _content_bytes)
                 if parsed:
                     parsed["start"] = abs_start
                     parsed["end"] = current_start_offset
@@ -1225,6 +1271,22 @@ class SimpleRCS:
                         signatures.append(f"{signer_id}|{sig_ts}|{sig_val}")
 
             self.stream.seek(0, os.SEEK_END)  # Append to end
+            append_pos = self.stream.tell()
+            if not self._is_block_boundary(append_pos):
+                # The block we're about to write must satisfy the same
+                # boundary invariant _is_block_boundary requires when
+                # scanning for it later (immediately preceded by a blank
+                # line, or at self._data_start) -- otherwise it would become
+                # permanently unfindable to a future scan: checkout()/log()
+                # on a stream reloaded from these exact bytes would silently
+                # "lose" the very commit being made right now (see
+                # test_commit_after_non_block_trailing_bytes_stays_findable).
+                # Only reachable here (head_info is None, i.e. "first
+                # commit") when the stream already has non-block trailing
+                # bytes despite that -- external corruption, a truncated
+                # prior write, or a caller-supplied stream not entirely
+                # written by SimpleRCS.
+                self.stream.write(b"\n\n")
             self.stream.write(
                 self._format_block(
                     block_data, current_hash=curr_hash, signatures=signatures, is_delta=False, encoding=encoding
