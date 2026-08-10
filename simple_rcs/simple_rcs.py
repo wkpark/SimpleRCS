@@ -146,10 +146,56 @@ class SimpleRCS:
         else:
             raise ValueError("Invalid input type. Expected file path, string, bytes, or file-like object.")
 
+        # Absolute offset where the first commit block begins: 0 for v1 (no
+        # header), or the byte length of the v2 magic-header line. Computed
+        # once here (version doesn't change over the object's lifetime, same
+        # assumption `self._version` already relies on); used by
+        # `_is_block_boundary` to recognize the very first block, which has
+        # no preceding blank line to check.
+        self._data_start: int = self._compute_data_start()
+
         self.head_info: dict | None = None
         self._head_cache_size: int = -1  # stream size at last successful _load_head scan
         self._head_meta_only: bool = False  # True when cached head_info has no 'text'
         self._load_head()
+
+    def _compute_data_start(self) -> int:
+        """Byte offset where block data begins: 0 for v1, or past the v2 header line."""
+        if self._version < 2:
+            return 0
+        pos = self.stream.tell()
+        self.stream.seek(0)
+        header_line = self.stream.readline()
+        self.stream.seek(pos)
+        return len(header_line)
+
+    def _is_block_boundary(self, abs_start: int) -> bool:
+        """True if `abs_start` is a genuine block-start offset, not a
+        coincidental "ver @"/"version @" match inside escaped block content.
+
+        `_format_block` always writes a block as `"\\n".join(lines) +
+        "\\n\\n"`, so every real block (except the very first, which follows
+        the v2 header or starts at offset 0 for v1 — see `_data_start`) is
+        immediately preceded by a blank line. `_load_head`/`_get_prev_block`
+        locate candidate block starts by scanning raw bytes for the literal
+        marker "ver @"/"version @", but `codec.escape` only doubles '@' —
+        it does not protect that 5/9-byte sequence from occurring inside an
+        escaped field value (e.g. a log message or page body containing
+        "whoever @admin" or "changelog: version @2"). Requiring the blank
+        line immediately before a candidate rules out that whole class of
+        false positives: reproducing it *and* fooling the parser afterward
+        would require content that imitates SimpleRCS's own block framing
+        verbatim, not just a stray "ver @"/"version @" substring.
+        """
+        if abs_start == self._data_start:
+            return True
+        if abs_start < 2:
+            return False
+        pos = self.stream.tell()
+        self.stream.seek(abs_start - 2)
+        is_boundary = self.stream.read(2) == b"\n\n"
+        self.stream.seek(pos)
+        return is_boundary
 
     def _write_v2_header(self) -> None:
         """Writes the v2 magic header with the chosen hash algorithm."""
@@ -720,26 +766,47 @@ class SimpleRCS:
             # Search for the rightmost "ver @" in this chunk + OVERLAP bytes of the
             # chunk to its right (to catch patterns split across a boundary).
             search_buf = chunk + tail_prefix
-            idx = max(search_buf.rfind(b"ver @"), search_buf.rfind(b"version @"))
+            search_limit = len(search_buf)
 
-            if idx != -1:
+            while True:
+                idx = max(
+                    search_buf.rfind(b"ver @", 0, search_limit),
+                    search_buf.rfind(b"version @", 0, search_limit),
+                )
+                if idx == -1:
+                    break
                 abs_start = pos + idx
-                if metadata_only:
-                    parsed = self._parse_block_meta_from_stream(abs_start, file_size)
-                else:
-                    # Assemble HEAD block from already-read chunks — no second seek+read.
-                    # collected[-1] is the current (leftmost) chunk; collected[0] is the
-                    # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
-                    head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
-                    parsed = self._parse_block_content_no_regex(head_bytes)
-                if parsed:
-                    parsed["start"] = abs_start
-                    parsed["end"] = file_size
-                    self.head_info = parsed
-                    self._head_cache_size = file_size
-                    self._head_meta_only = metadata_only
-                    return
-                # Parsed failed (false positive inside binary data) — keep scanning left.
+                if self._is_block_boundary(abs_start):
+                    if metadata_only:
+                        parsed = self._parse_block_meta_from_stream(abs_start, file_size)
+                    elif idx < len(chunk):
+                        # Assemble HEAD block from already-read chunks — no second seek+read.
+                        # collected[-1] is the current (leftmost) chunk; collected[0] is the
+                        # rightmost. HEAD block = chunk[idx:] + chunks to its right in order.
+                        head_bytes = chunk[idx:] + b"".join(reversed(collected[:-1]))
+                        parsed = self._parse_block_content_no_regex(head_bytes)
+                    else:
+                        # Match falls inside `tail_prefix` (spans into a chunk
+                        # read on a previous, further-right iteration) — rare;
+                        # re-read directly rather than threading that chunk
+                        # through too.
+                        self.stream.seek(abs_start)
+                        parsed = self._parse_block_content_no_regex(self.stream.read(file_size - abs_start))
+                    if parsed:
+                        parsed["start"] = abs_start
+                        parsed["end"] = file_size
+                        self.head_info = parsed
+                        self._head_cache_size = file_size
+                        self._head_meta_only = metadata_only
+                        return
+                    # Real boundary but parse failed (corrupted data) — give
+                    # up on this buffer, same as before; move to an earlier
+                    # chunk.
+                    break
+                # False positive inside escaped content (see
+                # _is_block_boundary) — keep looking further left within
+                # this same buffer before falling back to an earlier chunk.
+                search_limit = idx
 
             tail_prefix = chunk[:OVERLAP]
 
@@ -777,13 +844,22 @@ class SimpleRCS:
             # into `chunk`.
             limit_in_chunk = current_start_offset - scan_pos
 
-            # Search for block start (`ver @` or `version @`) in `chunk` up to `limit_in_chunk`
-            idx_v = chunk.rfind(b"ver @", 0, limit_in_chunk)
-            idx_version = chunk.rfind(b"version @", 0, limit_in_chunk)
-            idx = max(idx_v, idx_version)
+            # Search for block start (`ver @` or `version @`) in `chunk` up to `limit_in_chunk`,
+            # retrying further left within this same buffer whenever a candidate
+            # turns out to be a false positive inside escaped content (see
+            # _is_block_boundary) before falling back to an earlier chunk.
+            search_limit = limit_in_chunk
+            while True:
+                idx_v = chunk.rfind(b"ver @", 0, search_limit)
+                idx_version = chunk.rfind(b"version @", 0, search_limit)
+                idx = max(idx_v, idx_version)
+                if idx == -1:
+                    break
 
-            if idx != -1:
                 abs_start = scan_pos + idx  # Absolute offset of previous block's start
+                if not self._is_block_boundary(abs_start):
+                    search_limit = idx
+                    continue
 
                 if metadata_only:
                     parsed = self._parse_block_meta_from_stream(abs_start, current_start_offset)
@@ -811,6 +887,9 @@ class SimpleRCS:
                         # holds full text. Every other v1 block is a reverse delta.
                         parsed["is_delta"] = True
                     return parsed
+                # Real boundary but parse failed (corrupted data) — give up on
+                # this buffer, same as before; move to an earlier chunk.
+                break
 
         return None
 
