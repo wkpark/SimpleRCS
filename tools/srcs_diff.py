@@ -121,7 +121,9 @@ def main() -> None:
     parser.add_argument("--srcs-dir", default=".srcs", help="Directory to store .srcs files (default: .srcs)")
     parser.add_argument("--binary", action="store_true",
         help="Emit a git-compatible binary patch (GIT binary patch / literal) that 'git apply' accepts. "
-             "Text revisions still get the usual unified diff, as with 'git diff --binary'.")
+             "Text revisions still get the usual unified diff, as with 'git diff --binary'. "
+             "Exits 0 once the patch is written, so redirecting it to a file does not read as failure; "
+             "without this flag the exit status keeps diff(1) semantics (1 = the revisions differ).")
     parser.add_argument("--engine", default="difflib",
         choices=["difflib", "pydifflib", "myers", "ses", "dmp"],
         help="Diff engine to use (ses/dmp are the Cython Myers variants)")
@@ -208,7 +210,12 @@ def main() -> None:
                 )
             else:
                 print(f"Binary files {label_a} and {label_b} differ")
-            sys.exit(0 if content_a == content_b else 1)
+            # diff(1) semantics (1 = they differ) are wrong for --binary: the
+            # patch goes to stdout to be redirected, and a non-zero status there
+            # reads as "the patch was not produced" -- it aborts `set -e` scripts
+            # and `srcs_diff ... > p.patch && git apply p.patch`. git itself
+            # exits 0 unless asked for --exit-code.
+            sys.exit(0 if (args.binary or content_a == content_b) else 1)
         else:
             content_a = content_a_str
             content_b = content_b_str
