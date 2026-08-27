@@ -22,6 +22,16 @@ def main() -> None:
     parser.add_argument("-a", "--author", default=os.environ.get("USER", "unknown"), help="Author name")
     parser.add_argument("--no-sign", action="store_true", help="Disable GPG signing")
     parser.add_argument("--binary", action="store_true", help="Force committing content as binary")
+    parser.add_argument(
+        "--encoding",
+        default="base64",
+        choices=["esc", "base64", "base85"],
+        help=(
+            "How binary payloads are stored. esc is RCS-style '@@' escaping and by far the smallest "
+            "(~0.4%% overhead against base64's 33%%), but a stream holding one esc block cannot be read "
+            "by simple-rcs < 0.2.1. base85 uses git's alphabet."
+        ),
+    )
 
     # New: Configure storage directory
     parser.add_argument("--srcs-dir", default=".srcs",
@@ -89,6 +99,7 @@ def main() -> None:
             author=args.author,
             log=args.message,
             signer_callbacks=callbacks,
+            encoding=args.encoding,
         )
         print(f"Successfully committed '{target_path.name}' -> '{rcs_path}' (Version {new_ver})")
 
