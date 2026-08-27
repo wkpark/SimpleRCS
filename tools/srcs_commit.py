@@ -25,11 +25,12 @@ def main() -> None:
     parser.add_argument(
         "--encoding",
         default="base64",
-        choices=["esc", "base64", "base85"],
+        choices=["raw", "base64", "base85"],
         help=(
-            "How binary payloads are stored. esc is RCS-style '@@' escaping and by far the smallest "
-            "(~0.4%% overhead against base64's 33%%), but a stream holding one esc block cannot be read "
-            "by simple-rcs < 0.2.1. base85 uses git's alphabet."
+            "How binary payloads are encoded. raw is RCS-style: keep the bytes, let the block's '@' "
+            "escaping carry them -- ~0.4%% overhead against base64's 33%%, and faster to decode. "
+            "base85 uses git's alphabet. base64 streams are byte-identical to earlier releases; "
+            "raw and base85 blocks cannot be read by simple-rcs 0.2.0."
         ),
     )
 
