@@ -24,6 +24,38 @@ import zlib
 #: git's own limit: one line carries at most 52 decoded bytes.
 _MAX_BYTES_PER_LINE = 52
 
+#: The byte -> escape letter table git uses for path quoting (quote.c's cq_lookup).
+_C_ESCAPES = {
+    0x07: "a", 0x08: "b", 0x09: "t", 0x0A: "n", 0x0B: "v", 0x0C: "f", 0x0D: "r",
+    0x22: '"', 0x5C: "\\",
+}
+
+
+def _quote_path(path: str) -> str:
+    """git's C-style path quoting, for the header's ``a/``/``b/`` names.
+
+    A path is only data, but it is written into a line-structured format, so an
+    unquoted newline in it forges patch content. git solves this by quoting: a
+    name containing a control byte, a quote, a backslash or a high byte is
+    wrapped in double quotes with C escapes, and anything else is left alone
+    (a space does not trigger it). High bytes become three-digit octal, which is
+    what ``core.quotePath`` does by default.
+    """
+    raw = path.encode("utf-8", "surrogateescape")
+    if not any(b < 0x20 or b >= 0x7F or b in (0x22, 0x5C) for b in raw):
+        return path
+    out = ['"']
+    for byte in raw:
+        escape = _C_ESCAPES.get(byte)
+        if escape is not None:
+            out.append("\\" + escape)
+        elif 0x20 <= byte < 0x7F:
+            out.append(chr(byte))
+        else:
+            out.append(f"\\{byte:03o}")
+    out.append('"')
+    return "".join(out)
+
 
 def blob_id(data: bytes) -> str:
     """git's object id for `data` stored as a blob.
@@ -74,6 +106,9 @@ def _literal_block(data: bytes) -> list[str]:
 def binary_patch(path: str, old: bytes, new: bytes, mode: str = "100644") -> str:
     """A ``git apply``-able patch turning `old` into `new` at `path`.
 
+    `path` is quoted the way git quotes it, so a name carrying a newline cannot
+    forge patch content -- see :func:`_quote_path`.
+
     Emits the reverse block as well, so ``git apply -R`` undoes it. Returns an
     empty string when the two versions are identical, matching git, which
     prints nothing for an unchanged file.
@@ -81,7 +116,7 @@ def binary_patch(path: str, old: bytes, new: bytes, mode: str = "100644") -> str
     if old == new:
         return ""
     lines = [
-        f"diff --git a/{path} b/{path}",
+        f"diff --git {_quote_path('a/' + path)} {_quote_path('b/' + path)}",
         f"index {blob_id(old)}..{blob_id(new)} {mode}",
         "GIT binary patch",
         *_literal_block(new),  # forward: what `git apply` installs

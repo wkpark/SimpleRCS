@@ -122,3 +122,62 @@ def test_git_apply_accepts_the_patch_and_reverses_it(tmp_path):
 
     git("apply", "-R", str(patch))
     assert target.read_bytes() == OLD
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("plain.bin", "a/plain.bin"),                       # nothing to escape
+        ("with space.bin", "a/with space.bin"),             # a space alone does not trigger it
+        ("we\nird.bin", r'"a/we\nird.bin"'),
+        ("ta\tb.bin", r'"a/ta\tb.bin"'),
+        ("be\x07ll.bin", r'"a/be\all.bin"'),
+        ('qu"ote.bin', r'"a/qu\"ote.bin"'),
+        ("back\\slash.bin", r'"a/back\\slash.bin"'),
+        ("한글.bin", r'"a/\355\225\234\352\270\200.bin"'),  # high bytes -> octal, as core.quotePath does
+    ],
+)
+def test_path_quoting_matches_gits_rule(path, expected):
+    """These strings are `git diff --binary`'s own output, taken from a real
+    repository with those filenames -- not derived from reading quote.c."""
+    assert gitpatch._quote_path("a/" + path) == expected
+
+
+def test_a_newline_in_the_path_cannot_forge_a_header():
+    """The path is data written into a line-structured format. Unquoted, a
+    newline in it opens a second `diff --git` line the reader would believe."""
+    patch = gitpatch.binary_patch("ok.bin\ndiff --git a/etc/passwd b/etc/passwd", OLD, NEW)
+
+    # The forged text is still *in* the patch -- it is the filename the caller
+    # asked for. What matters is that it stays inside one quoted header instead
+    # of opening a second line a reader would believe.
+    headers = [line for line in patch.splitlines() if line.startswith("diff --git ")]
+    assert len(headers) == 1
+    assert headers[0].startswith('diff --git "a/ok.bin\\ndiff --git a/etc/passwd')
+    assert "\n" not in gitpatch._quote_path("a/ok.bin\ndiff --git a/etc/passwd b/etc/passwd")
+
+
+@needs_git
+def test_git_applies_a_patch_for_a_path_it_has_to_quote(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run([GIT, *args], cwd=repo, capture_output=True, text=True, check=True)
+
+    git("init", "-q", ".")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+
+    name = "we\nird 한글.bin"
+    target = repo / name
+    target.write_bytes(OLD)
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+
+    (repo / "out.patch").write_text(gitpatch.binary_patch(name, OLD, NEW))
+    git("apply", "out.patch")
+    assert target.read_bytes() == NEW
+
+    git("apply", "-R", "out.patch")
+    assert target.read_bytes() == OLD
