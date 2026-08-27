@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from simple_rcs import gitpatch
 from simple_rcs.myersdiff import MyersSequenceMatcher
 from simple_rcs.pydifflib import StreamSequenceMatcher
 from simple_rcs.simple_rcs import SimpleRCS
@@ -118,6 +119,9 @@ def main() -> None:
 
     parser.add_argument("-r", "--revision", help="Revision(s) to compare. Format: '1.1' (vs HEAD) or '1.1:1.2'")
     parser.add_argument("--srcs-dir", default=".srcs", help="Directory to store .srcs files (default: .srcs)")
+    parser.add_argument("--binary", action="store_true",
+        help="Emit a git-compatible binary patch (GIT binary patch / literal) that 'git apply' accepts. "
+             "Text revisions still get the usual unified diff, as with 'git diff --binary'.")
     parser.add_argument("--engine", default="difflib",
         choices=["difflib", "pydifflib", "myers", "ses", "dmp"],
         help="Diff engine to use (ses/dmp are the Cython Myers variants)")
@@ -179,6 +183,9 @@ def main() -> None:
 
     # 3. Check for Binary
     if isinstance(content_a, bytes) or isinstance(content_b, bytes):
+        def as_bytes(data):
+            return data if isinstance(data, bytes) else data.encode("utf-8")
+
         def ensure_str(data):
             if isinstance(data, str):
                 return data, False
@@ -191,7 +198,16 @@ def main() -> None:
         content_b_str, is_bin_b = ensure_str(content_b)
 
         if is_bin_a or is_bin_b:
-            print(f"Binary files {label_a} and {label_b} differ")
+            if args.binary:
+                # Path as the caller wrote it, so `git apply` resolves it the
+                # same way from the same directory; an absolute one cannot
+                # appear in a patch, so fall back to the bare name.
+                patch_path = str(target_path) if not target_path.is_absolute() else target_path.name
+                sys.stdout.write(
+                    gitpatch.binary_patch(patch_path, as_bytes(content_a), as_bytes(content_b))
+                )
+            else:
+                print(f"Binary files {label_a} and {label_b} differ")
             sys.exit(0 if content_a == content_b else 1)
         else:
             content_a = content_a_str
