@@ -202,6 +202,13 @@ def test_parse_block_content_matches_no_regex():
     rcs.commit("Line 1\nLine 2\n", author="a", log="text v1")
     rcs.commit("Line 1\nLine 2 modified\nLine 3\n", author="a", log="text v2")
     rcs.commit(b"\x00\x01\x02\xff\xfe", author="a", log="binary v3")
+    # base85's alphabet contains '@', so this block exercises the escaping the
+    # two parsers have to agree on. The leading group encodes to base85 "000@@":
+    # two *adjacent* '@' in the payload, which become four once escaped, so a
+    # parser that unescapes them a second time collapses them wrongly. 'raw' is
+    # deliberately absent -- the regex parser works on a decoded str and cannot
+    # hold those bytes (see its docstring).
+    rcs.commit(b"\x00\x00\x19\xde" + b"@;\n\nver @x", author="a", log="binary v4", encoding="base85")
 
     raw = rcs.stream.getvalue()
 
@@ -219,7 +226,7 @@ def test_parse_block_content_matches_no_regex():
         offsets.append((prev["start"], prev["end"]))
         block = prev
 
-    assert len(offsets) == 3, "expected to walk all 3 committed blocks"
+    assert len(offsets) == 4, "expected to walk all 4 committed blocks"
 
     for start, end in offsets:
         block_bytes = raw[start:end]

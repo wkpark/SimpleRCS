@@ -1,9 +1,13 @@
-"""The 'esc' binary encoding: RCS-style raw bytes with '@' doubled.
+"""Binary payload storage: escaping is the container's rule, not an encoding.
 
-Every other field in a block escapes '@', which makes '@' parity a decidable
-rule for finding field delimiters. base64 satisfies it for free (no '@' in its
-alphabet); base85 and raw do not, and were stored unescaped -- the one place the
-rule broke. 'esc' closes that, and costs ~0.4% instead of base64's 33%.
+Every value in a block doubles its '@'. That is what makes '@' parity a
+decidable way to find field delimiters, so it has to hold for binary payloads
+too -- they used to be the one exception, stored verbatim. The `<length>;<tag>,`
+header now says only how the bytes were encoded (raw / base64 / base85) and
+counts what is actually on disk, post-escape.
+
+`raw` is the RCS-style option that escaping makes usable: keep the bytes, double
+the '@'. ~0.4% overhead against base64's 33%, and it decodes faster.
 """
 
 import io
@@ -14,9 +18,11 @@ import pytest
 from simple_rcs import codec
 from simple_rcs.simple_rcs import SimpleRCS
 
+ENCODINGS = ["raw", "base64", "base85"]
+
 # Payloads shaped like the framing itself: markers, delimiters, block
-# separators, and length headers. Only 'esc' stores these bytes verbatim, so
-# only 'esc' can put them into the stream where a scan will meet them.
+# separators, and length headers. Only `raw` stores these bytes verbatim, so
+# only `raw` can put them into the stream where a scan will meet them.
 ADVERSARIAL = [
     b"",
     b"@",
@@ -25,7 +31,7 @@ ADVERSARIAL = [
     b"\n\nver @@;",
     b"\n\nversion @1.0@;\ndate @x@;\n",
     b"binary @\n\nver @@;\xf4i\xb4",
-    b"12;esc,99;base64,@@99;base64,",
+    b"12;raw,99;base64,@@99;base64,",
     bytes(range(256)) * 4,
 ]
 
@@ -35,7 +41,7 @@ def _commit_all(rcs: SimpleRCS, blobs, encoding: str) -> None:
         rcs.commit(blob, author="u@h", log=f"m{i} @; ver @x", encoding=encoding)
 
 
-@pytest.mark.parametrize("encoding", ["esc", "base64", "base85"])
+@pytest.mark.parametrize("encoding", ENCODINGS)
 def test_every_version_round_trips_through_adversarial_payloads(encoding):
     rcs = SimpleRCS(io.BytesIO())
     _commit_all(rcs, ADVERSARIAL, encoding)
@@ -46,10 +52,11 @@ def test_every_version_round_trips_through_adversarial_payloads(encoding):
     assert [e["ver"] for e in SimpleRCS(io.BytesIO(raw)).log()] == [f"1.{i}" for i in range(len(ADVERSARIAL))][::-1]
 
 
-def test_the_hash_chain_verifies_over_esc_blocks():
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_the_hash_chain_verifies_over_binary_blocks(encoding):
     rcs = SimpleRCS()  # v2: writes the header, so verify() actually runs
     assert rcs._version == 2
-    _commit_all(rcs, ADVERSARIAL, "esc")
+    _commit_all(rcs, ADVERSARIAL, encoding)
 
     raw = rcs.get_bytes()
     assert SimpleRCS(io.BytesIO(raw)).verify() is True
@@ -68,57 +75,55 @@ def _odd_parity_hits(block: bytes) -> int:
 _FIELDS_IN_A_FIRST_BINARY_BLOCK = 5  # ver, date, author, log, binary
 
 
-def test_esc_keeps_at_parity_exact_where_base85_does_not():
-    """The point of the encoding: with every field escaped, counting '@' runs
-    finds exactly the real delimiters -- no marker text search needed."""
-    # The leading group encodes to base85 "000@;" -- an unescaped '@' right
-    # before a ';', which is exactly the shape parity reads as a terminator.
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_at_parity_is_exact_for_every_encoding(encoding):
+    """The property the escaping exists for. base85 used to break it: its
+    alphabet has both '@' and ';', so an unescaped payload could spell a
+    terminator. The leading group below encodes to base85 "000@;" precisely to
+    reproduce that."""
     payload = b"\x00\x00\x19\xd9" + b"\xff@;\n\nver @content that looks like framing@;"
-    hits = {}
-    for encoding in ("base64", "base85", "esc"):
-        rcs = SimpleRCS(io.BytesIO())
-        rcs.commit(payload, author="u", log="a@;b / literal @@; pair / ver @fake", encoding=encoding)
-        raw = rcs.get_bytes()
-        hits[encoding] = _odd_parity_hits(raw[raw.find(b"ver @") :])
+    rcs = SimpleRCS(io.BytesIO())
+    rcs.commit(payload, author="u", log="a@;b / literal @@; pair / ver @fake", encoding=encoding)
 
-    assert hits["esc"] == _FIELDS_IN_A_FIRST_BINARY_BLOCK, "esc must be parity-exact"
-    assert hits["base64"] == _FIELDS_IN_A_FIRST_BINARY_BLOCK, "base64 is parity-exact for free"
-    assert hits["base85"] > _FIELDS_IN_A_FIRST_BINARY_BLOCK, "base85 stores '@' unescaped -- still not exact"
+    raw = rcs.get_bytes()
+    assert _odd_parity_hits(raw[raw.find(b"ver @") :]) == _FIELDS_IN_A_FIRST_BINARY_BLOCK
 
 
-def test_esc_stores_less_than_base64():
+def test_raw_stores_less_than_base64():
     payload = bytes(range(256)) * 40  # 10 KiB, '@' at the natural 1/256 rate
     sizes = {}
-    for encoding in ("esc", "base64"):
+    for encoding in ("raw", "base64"):
         rcs = SimpleRCS(io.BytesIO())
         rcs.commit(payload, author="u", log="v1", encoding=encoding)
         sizes[encoding] = len(rcs.get_bytes())
 
-    assert sizes["esc"] < len(payload) * 1.02, "escaping should cost ~0.4%, not a constant factor"
+    assert sizes["raw"] < len(payload) * 1.02, "escaping should cost ~0.4%, not a constant factor"
     assert sizes["base64"] > len(payload) * 1.3
 
 
-@pytest.mark.parametrize(
-    ("encoding", "expected_tag"),
-    [("esc", "esc"), ("base64", "base64"), ("base85", "base85"), ("raw", "raw")],
-)
-def test_encode_binary_round_trips_and_tags_its_header(encoding, expected_tag):
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_the_header_length_counts_the_bytes_actually_stored(encoding):
+    """What makes the forward seek-skip exact for every encoding: the count is
+    taken after escaping, not before."""
     payload = bytes(range(256)) * 2
     stored = codec.encode_binary(payload, encoding)
 
-    assert codec.binary_tag(stored) == expected_tag
+    assert codec.binary_tag(stored) == encoding
     assert codec.decode_binary(stored) == payload
-    # The header length always counts the bytes that follow it, so a forward
-    # parser can skip the payload in one seek whatever the encoding is.
     length, _, rest = stored.partition(b",")
     assert int(length.split(b";")[0]) == len(rest)
 
 
+def test_an_unknown_encoding_tag_is_rejected():
+    with pytest.raises(ValueError, match="Unknown binary encoding"):
+        codec.decode_binary(b"4;base99,AAAA")
+
+
 def test_a_payload_containing_an_encoding_tag_is_not_misdispatched():
-    """decode_binary used to search the whole value for ';base64,'. A raw or
-    escaped payload can contain that itself."""
+    """decode_binary used to search the whole value for ';base64,'. A raw
+    payload can contain that itself."""
     payload = b"xx;base64,QUJD and ;base85, too"
-    assert codec.decode_binary(codec.encode_binary(payload, "esc")) == payload
+    assert codec.decode_binary(codec.encode_binary(payload, "raw")) == payload
 
 
 def test_binary_tag_ignores_an_encoding_tag_inside_a_text_delta():
@@ -132,30 +137,25 @@ def test_binary_tag_ignores_an_encoding_tag_inside_a_text_delta():
 
 def test_get_bytes_is_lossless_where_get_content_is_not():
     rcs = SimpleRCS(io.BytesIO())
-    rcs.commit(b"\xff\xfe\x00 binary that is not text\n", author="u", log="v1", encoding="esc")
+    rcs.commit(b"\xff\xfe\x00 binary that is not text\n", author="u", log="v1", encoding="raw")
 
     assert rcs.get_bytes() == rcs.stream.getvalue()
     # get_content() decodes with errors="replace", so it cannot round-trip this.
     assert rcs.get_content().encode(rcs.encoding) != rcs.get_bytes()
 
 
-@pytest.mark.parametrize("legacy_encoding", ["base64", "base85"])
-def test_streams_written_before_esc_existed_still_read_and_accept_commits(legacy_encoding):
-    blobs = [bytes(range(256)) * 2, b"@" * 50, b"tail"]
+def test_base64_streams_are_byte_identical_to_the_unescaped_format():
+    """base64's alphabet has no '@', so escaping is a no-op and its stored form
+    did not change -- the reason existing base64 histories need no migration."""
     rcs = SimpleRCS(io.BytesIO())
-    _commit_all(rcs, blobs, legacy_encoding)
-    legacy = rcs.get_bytes()
+    rcs.commit(bytes(range(256)) * 2, author="u", log="v1", encoding="base64")
 
-    # The tag in the header is what selects the decoder, so nothing migrates.
-    assert f";{legacy_encoding},".encode() in legacy
-    reopened = SimpleRCS(io.BytesIO(legacy))
-    assert [reopened.checkout(f"1.{i}") for i in range(len(blobs))] == blobs
+    raw = rcs.get_bytes()
+    start = raw.index(b"binary @") + len(b"binary @")
+    header, _, payload = raw[start : raw.index(b"@;", start)].partition(b",")
 
-    # And a new commit lands on top without disturbing the older blocks.
-    appended = SimpleRCS(io.BytesIO(legacy))
-    assert appended.commit(b"appended\n", author="u", log="new", encoding="esc") == f"1.{len(blobs)}"
-    assert appended.checkout(f"1.{len(blobs) - 1}") == blobs[-1]
-    assert appended.checkout("1.0") == blobs[0]
+    assert b"@" not in payload, "nothing to escape in a base64 payload"
+    assert int(header.split(b";")[0]) == len(payload)
 
 
 def _marker_run_length(raw: bytes, marker_start: int) -> int:
@@ -168,7 +168,7 @@ def _marker_run_length(raw: bytes, marker_start: int) -> int:
 
 
 def test_a_marker_inside_an_escaped_payload_is_not_taken_for_a_block():
-    """esc stores bytes verbatim, so a payload can contain the block marker.
+    """`raw` stores bytes verbatim, so a payload can contain the block marker.
     Escaping makes the two cases tell themselves apart: a delimiter is a single
     '@', a doubled one inside a value is a run of two or more.
 
@@ -177,9 +177,9 @@ def test_a_marker_inside_an_escaped_payload_is_not_taken_for_a_block():
     """
     poison = b"binary @\n\nver @@;\xf4i\xb4 payload"
     rcs = SimpleRCS(io.BytesIO())
-    rcs.commit(b"first\n", author="u", log="v1", encoding="esc")
-    rcs.commit(b"second\n", author="u", log="v2", encoding="esc")
-    rcs.commit(poison, author="u", log="v3", encoding="esc")
+    rcs.commit(b"first\n", author="u", log="v1", encoding="raw")
+    rcs.commit(b"second\n", author="u", log="v2", encoding="raw")
+    rcs.commit(poison, author="u", log="v3", encoding="raw")
 
     raw = rcs.get_bytes()
     runs = [_marker_run_length(raw, m.start() + 2) for m in re.finditer(rb"\n\n(ver|version) @", raw)]
