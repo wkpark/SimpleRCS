@@ -25,14 +25,21 @@ import zlib
 _MAX_BYTES_PER_LINE = 52
 
 
-def blob_id(data: bytes, hash_algo: str = "sha1") -> str:
+def blob_id(data: bytes) -> str:
     """git's object id for `data` stored as a blob.
 
     This is what the patch's ``index`` line names, and what ``git apply``
     checks the file it is about to patch against.
+
+    sha1 is the format's, not a choice: git refuses a binary patch whose index
+    line is not a full sha1 object id ("cannot apply binary patch ... without
+    full index line"). A sha256 repository would need the object format read
+    from the target repository, not a default on this function.
     """
     header = b"blob %d\0" % len(data)
-    return hashlib.new(hash_algo, header + data).hexdigest()
+    # usedforsecurity=False: this is git's object id, not a security hash --
+    # it also lets the call work on a FIPS build, where sha1 is otherwise refused.
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
 
 
 def _length_prefix(n: int) -> str:
