@@ -248,3 +248,44 @@ def test_verify_handles_truncation_at_many_cut_points():
         rcs = SimpleRCS(_truncated_block_stream(extra))
         result = rcs.verify()
         assert result in (True, False), f"cut+{extra} returned {result!r}"
+
+
+def _corrupt_historical_block_content() -> bytes:
+    """A stream whose *historical* block parses to metadata with no content.
+
+    The truncation helper above can only damage HEAD, since it cuts at EOF.
+    This reaches the other guard by breaking a block in the middle of the
+    file: renaming the content keyword makes the parser stop after `log`,
+    which is the same shape a half-written block leaves behind. The
+    replacement keeps the byte length so every later block offset still
+    lines up -- only this block's parse is affected.
+    """
+    rcs = SimpleRCS()
+    for i, text in enumerate(("alpha\nbravo\n", "alpha\nBRAVO\n", "alpha\nBRAVO\ncharlie\n")):
+        rcs.commit(text, author="t", log=f"v{i}")
+    raw = rcs.stream.getvalue()
+
+    start = raw.index(b"ver @1.1@;")
+    end = raw.index(b"ver @1.2@;")
+    block = raw[start:end]
+    assert b"\ndelta @" in block, "precondition: 1.1 was demoted to a delta block"
+    return raw[:start] + block.replace(b"\ndelta @", b"\nxelta @", 1) + raw[end:]
+
+
+def test_verify_reports_a_contentless_historical_block_instead_of_raising():
+    """The HEAD guard is not enough: the walk back hits the same shape.
+
+    verify() reconstructs older versions by walking back from HEAD, and
+    indexed each block's content the same way it indexed HEAD's. A block
+    that parsed without one raised KeyError there too -- past the HEAD
+    guard, so fixing only HEAD leaves this path dead.
+    """
+    damaged = _corrupt_historical_block_content()
+    rcs = SimpleRCS(damaged)
+
+    prev = rcs._get_prev_block(rcs.head_info["start"])
+    assert prev is not None, "precondition: the damaged block is still located"
+    assert prev["ver"] == "1.1"
+    assert "text" not in prev, "precondition: it parses to metadata with no content"
+
+    assert rcs.verify() is False
