@@ -1,8 +1,8 @@
 """Regression tests for the HEAD/history backward-scan false-positive bug.
 
 `_load_head()` and `_get_prev_block()` locate block boundaries by scanning raw
-bytes backwards for the literal marker "ver @"/"version @". `codec.escape`
-only doubles '@' -> '@@'; it does not protect that marker string from
+bytes backwards for the literal marker "ver @". `codec.escape` only
+doubles '@' -> '@@'; it does not protect that marker string from
 occurring *inside* an escaped field value. Ordinary content like
 
     "Please ask whoever @admin is on call today."
@@ -20,8 +20,8 @@ the blank line `_format_block` always writes, or be the very first block).
 
 That boundary check alone isn't sufficient, though: `codec.escape` doesn't
 escape newlines, so ordinary content containing a literal blank line
-immediately followed by "ver @"/"version @" (e.g. changelog/wiki prose like
-"...\n\nversion @2.0 release notes...") still passes it, and used to make
+immediately followed by "ver @" (e.g. changelog/wiki prose like
+"...\n\nwhatever @2.0 release notes...") still passes it, and used to make
 the scanner stop looking (either accepting garbage or giving up on the
 whole buffer) instead of continuing left to the real block. `_scan_for_block`
 now keeps retrying further left whenever a structurally-valid-looking
@@ -29,21 +29,25 @@ candidate still fails to parse, not just when it fails the boundary check.
 See `test_head_checkout_survives_blank_line_and_marker_collision` et al.
 """
 
+import io
+
 from simple_rcs.simple_rcs import SimpleRCS
 
 # Ends up containing the literal byte sequence "ver @" once escaped (@ -> @@):
 # "...whoever @@admin..." -> rfind(b"ver @") matches inside "whoever ' '@@".
 COLLIDING_TEXT = "Please ask whoever @admin is on call today.\n"
 
-# Ends up containing the literal byte sequence "version @" once escaped:
-# "...changelog: version @@2..." -> rfind(b"version @") matches at "version ' '@@".
+# Collided with the "version @" marker the scan used to look for as well.
+# Nothing ever wrote that marker, so it was dropped and this can no longer
+# collide -- kept as insurance against reintroducing it.
 COLLIDING_TEXT_VERSION_MARKER = "changelog: version @2 fixes the bug.\n"
 
 # Contains a *real* blank line (newlines aren't escaped) immediately followed
-# by "version @" -- passes _is_block_boundary's blank-line check on its own,
-# so this only round-trips correctly because of the retry-on-parse-failure
-# loop in _scan_for_block, not the boundary check alone.
-COLLIDING_LOG_MESSAGE = "Initial import.\n\nversion @2.0 release notes...\n"
+# by the marker. Escaping doubles the '@', so the boundary check now settles it
+# on parity ("ver @@" is inside a value, never a delimiter); before that check
+# existed, this only round-tripped because of the retry-on-parse-failure loop
+# in _scan_for_block.
+COLLIDING_LOG_MESSAGE = "Initial import.\n\nver @2.0 release notes...\n"
 
 
 def _reload(rcs: SimpleRCS) -> SimpleRCS:
@@ -151,3 +155,20 @@ def test_historical_block_survives_blank_line_and_marker_collision():
     history = reloaded.log()
     assert [h["ver"] for h in history] == ["1.1", "1.0"]
     assert history[-1]["author"] == "alice"
+
+
+def test_a_block_headed_by_the_dropped_version_marker_is_not_located():
+    """`_format_block` has only ever written "ver" (`keys = ["ver", ...]` since
+    the initial commit). The readers also accepted "version" "for backward
+    compatibility" with a writer that never existed, which cost a second rfind
+    per chunk and doubled the false-positive surface. This pins the removal: a
+    block header spelled "version @" is content, not framing."""
+    rcs = SimpleRCS()
+    rcs.commit("real content\n", author="alice", log="v1")
+    raw = rcs.get_bytes()
+
+    forged = raw + b"\n\nversion @9.9@;\ndate @2026-01-01T00:00:00@;\nauthor @mallory@;\nlog @x@;\ntext @nope\n@;\n\n"
+    reloaded = SimpleRCS(io.BytesIO(forged))
+
+    assert reloaded.head_info["ver"] == "1.0"
+    assert reloaded.checkout() == "real content\n"

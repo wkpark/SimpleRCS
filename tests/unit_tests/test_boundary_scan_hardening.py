@@ -17,7 +17,7 @@ false-positive HEAD-scan fix (see test_head_scan_false_positive.py) itself.
    block-to-EOF byte range on every rejected candidate, making a scan
    super-linear (trending toward O(n^2)) on content with many "blank line +
    marker" collisions -- exactly the kind of content that fix targets (e.g.
-   changelog/wiki prose with several "version @N" mentions).
+   changelog/wiki prose with several "ver @N"-shaped mentions).
 """
 
 import io
