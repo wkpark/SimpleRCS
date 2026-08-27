@@ -1269,6 +1269,17 @@ class SimpleRCS:
             result += "\n"
         return result
 
+    def _rewrite_head(self, payload: bytes) -> None:
+        """Replace the tail of the stream, from the current HEAD's start, with payload.
+
+        This is the one destructive operation in the format: it seeks backwards over
+        live data and overwrites it. Both callers (commit() and sign_head()) go
+        through here so that anything guarding that write only has to be written once.
+        """
+        self.stream.seek(self.head_info["start"])
+        self.stream.write(payload)
+        self.stream.truncate()  # Crucial: remove any leftover
+
     def _format_block(
         self,
         data: dict,
@@ -1535,9 +1546,7 @@ class SimpleRCS:
 
         # Single write() call: two separate writes would leave the file with an
         # overwritten old HEAD but no new HEAD if the process dies in between.
-        self.stream.seek(self.head_info["start"])
-        self.stream.write(old_block_bytes + new_block_bytes)
-        self.stream.truncate()  # Crucial: remove any leftover
+        self._rewrite_head(old_block_bytes + new_block_bytes)
 
         return new_ver
 
@@ -1958,9 +1967,7 @@ class SimpleRCS:
             signatures=all_signatures,
         )
 
-        self.stream.seek(self.head_info["start"])
-        self.stream.write(block_bytes)
-        self.stream.truncate()  # Ensure no leftover if new block is shorter (unlikely here)
+        self._rewrite_head(block_bytes)
 
         # Refresh head_info so instance state reflects new signatures
         self._load_head()
