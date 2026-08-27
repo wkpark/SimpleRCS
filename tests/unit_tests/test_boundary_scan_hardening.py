@@ -211,3 +211,40 @@ def test_parsers_stop_at_the_next_block_start():
 
     meta = rcs._parse_block_meta_from_stream(rcs._data_start, len(raw))
     assert meta["ver"] == "1.0", "_parse_block_meta_from_stream merged the next block"
+
+
+def _truncated_block_stream(extra_bytes: int) -> bytes:
+    """A stream whose second commit was cut off partway through the tail rewrite.
+
+    Built by hand rather than with RLIMIT_FSIZE so the test stays portable and
+    leaves no process-wide state behind.
+    """
+    rcs = SimpleRCS()
+    rcs.commit("alpha\nbravo\ncharlie\n", author="t", log="v1")
+    rcs.commit("alpha\nBRAVO\ncharlie\n", author="t", log="v2")
+    rcs._load_head(force=True)
+    raw = rcs.stream.getvalue()
+    return raw[: rcs.head_info["start"] + extra_bytes]
+
+
+def test_verify_reports_a_truncated_head_instead_of_raising():
+    """verify() returns False on damage; it must not raise (see AGENTS.md).
+
+    A commit() interrupted mid-write (ENOSPC, SIGKILL, power loss) leaves a
+    HEAD block whose content field never landed, so parsing yields metadata
+    with no 'text'. verify() used to index that key directly and die with
+    KeyError -- the one call that exists to detect this damage was the one
+    that crashed on it.
+    """
+    # Far enough in to keep "ver @...@;" parseable, short of the content field.
+    truncated = _truncated_block_stream(len(b"ver @1.1@;\n"))
+    rcs = SimpleRCS(truncated)
+    assert rcs.verify() is False
+
+
+def test_verify_handles_truncation_at_many_cut_points():
+    """No cut point may raise, whatever partial block it leaves behind."""
+    for extra in range(0, 120, 7):
+        rcs = SimpleRCS(_truncated_block_stream(extra))
+        result = rcs.verify()
+        assert result in (True, False), f"cut+{extra} returned {result!r}"

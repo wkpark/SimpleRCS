@@ -1950,6 +1950,16 @@ class SimpleRCS:
         # we start with HEAD (Full Text) and apply deltas to get previous versions.
         # This matches the 'checkout' traversal logic perfectly.
 
+        if "text" not in curr_block:
+            # A block whose content field never finished writing parses into
+            # metadata with no 'text' -- e.g. a commit() interrupted partway
+            # through the tail rewrite (ENOSPC, SIGKILL, power loss). That is
+            # exactly the damage verify() exists to report, so report it
+            # instead of raising: callers rely on False, not an exception
+            # (see the class docstring and AGENTS.md).
+            logger.error("HEAD block has no content field (truncated write?)")
+            return False
+
         curr_text = curr_block["text"]  # HEAD is Full Text
 
         # We need to track the 'expected hash' for the *next* block's prev_hash check
@@ -2032,6 +2042,12 @@ class SimpleRCS:
 
                 # Apply delta to get Full Text of Previous Version (or use Snapshot)
                 # MODIFIED: Handle snapshots during verification
+                if "text" not in prev_block:
+                    # Same truncation case as HEAD above, one block further back.
+                    logger.error(
+                        f"Block {prev_block.get('ver')} has no content field (truncated write?)"
+                    )
+                    return False
                 if not prev_block.get("is_delta", True):
                     curr_text = prev_block["text"]  # Snapshot: Reset text
                 else:
