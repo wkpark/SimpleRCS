@@ -110,3 +110,25 @@ def test_load_head_scan_stays_roughly_linear_with_many_collisions():
     # them apart without being sensitive to machine noise.
     assert times[1] / times[0] < 8
     assert times[2] / times[1] < 8
+
+
+def test_field_value_ending_in_marker_prefix_is_not_a_block_start():
+    """A value ending in "ver " borrows the closing '@' to form a fake marker.
+
+    Distinct from the escaped-'@' collisions the other tests cover: here the
+    '@' completing "ver @" is the delimiter _format_block writes, not escaped
+    content, so it is not part of a '@@' pair. Any check that only looks for
+    doubled '@' would let this through. log/author take the caller's string
+    verbatim, unlike text, which commit() always terminates with a newline.
+    """
+    rcs = SimpleRCS()
+    rcs.commit("real content here\n", author="t", log="Please check ver ")
+
+    raw = rcs.stream.getvalue()
+    fake = raw.find(b"ver @", raw.find(b"log @"))
+    assert fake != -1, "precondition: the log field must produce a fake marker"
+    assert raw[fake + 5 : fake + 6] == b";", "precondition: not a '@@' pair"
+
+    reloaded = SimpleRCS(raw)
+    assert reloaded.checkout() == "real content here\n"
+    assert reloaded.log()[0]["log"] == "Please check ver "
