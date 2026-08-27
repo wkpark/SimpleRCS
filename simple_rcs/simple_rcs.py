@@ -1156,7 +1156,11 @@ class SimpleRCS:
                 for line in lines_b:
                     output.append(line.decode(self.encoding).rstrip("\n"))
 
-        return "\n".join(output)
+        # Every line newline-terminated. Joining without the final "\n" made a
+        # payload that ends in a blank line ("a1 1", "") serialize as "a1 1\n",
+        # byte-identical to the command with no payload at all, and the blank
+        # line was lost on checkout.
+        return "\n".join(output) + "\n" if output else ""
 
     def _apply_reverse_delta(self, current_data: str | bytes, delta_text: str | bytes) -> str | bytes:  # noqa: C901
         """
@@ -1219,6 +1223,28 @@ class SimpleRCS:
                     if i < len(script_lines):
                         payload.append(script_lines[i] + "\n")  # Restore newline
                         i += 1
+                if len(payload) == count - 1:
+                    # A delta written before the terminator fix above. That
+                    # encoder joined the script with "\n" and no trailing one,
+                    # so a payload whose last line was blank serialized
+                    # identically to one line shorter -- and it could only ever
+                    # lose that one line, never more, and never a non-blank one
+                    # (the separators for the rest are still there). Restoring
+                    # it reproduces the original text exactly; on a v2 stream
+                    # the hash chain confirms the reconstruction.
+                    #
+                    # A file truncated precisely one payload line short would be
+                    # repaired into wrong text instead of raising. That needs
+                    # surgical damage -- losing the tail normally takes the
+                    # closing '@;' with it, and the block fails to parse well
+                    # before here -- and v2 still reports it.
+                    payload.append("\n")
+                if len(payload) != count:
+                    # Short by more than one: no encoder this project has ever
+                    # shipped produces that, so there is nothing to reconstruct.
+                    raise SimpleRCSCorruptionError(
+                        f"Delta command 'a{start} {count}' has {len(payload)} payload line(s)"
+                    )
             commands.append({"cmd": cmd_char, "line": start, "count": count, "payload": payload})
 
         # Sort commands by line number in descending order.
