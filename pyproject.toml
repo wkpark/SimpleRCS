@@ -34,8 +34,7 @@ dev = [
     "ruff>=0.11.8",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
-    "Cython>=3.0",     # builds the benchmark-only matchers; see scripts/build_ext.sh
-    "setuptools",      # cythonize needs the distutils shim on Python 3.12+
+    "Cython>=3.0",     # the build backend needs it too; here so `uv sync` compiles in place
 ]
 
 [tool.ruff]
@@ -82,21 +81,18 @@ ignore = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=77", "Cython>=3.0"]
+build-backend = "setuptools.build_meta"
 
-# The Cython matchers (simple_rcs/_myersdiff_*.pyx) are benchmark-only: nothing
-# under simple_rcs/ imports them, and tools/bench_diff.py already skips them
-# when they are absent. Shipping them would force a C toolchain on every
-# installer for no runtime gain, so the distribution is pure Python and the
-# .pyx sources stay a local build (see AGENTS.md and tools/bench_diff.py).
-[tool.hatch.version]
-path = "simple_rcs/__init__.py"
+# The Cython matchers are built when a C toolchain is present and skipped
+# otherwise -- setup.py downgrades a failed compile to a warning, and
+# simple_rcs/matchers.py falls back to StreamSequenceMatcher at import time.
+# Extensions must stay optional: they are a speedup, never a requirement.
+[tool.setuptools.dynamic]
+version = {attr = "simple_rcs.__version__"}
 
-[tool.hatch.build.targets.wheel]
-packages = ["simple_rcs"]
-exclude = ["*.pyx", "*.c", "*.so"]
+[tool.setuptools.packages.find]
+include = ["simple_rcs*"]
 
-[tool.hatch.build.targets.sdist]
-only-include = ["simple_rcs", "tests", "README.md", "LICENSE"]
-exclude = ["*.c", "*.so"]
+[tool.setuptools.package-data]
+simple_rcs = ["*.pyx"]

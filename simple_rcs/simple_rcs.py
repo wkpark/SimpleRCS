@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import BinaryIO
 
 from . import codec, pybsdiff
-from .pydifflib import StreamSequenceMatcher
+from .matchers import new_matcher
 
 logger = logging.getLogger(__name__)
 
@@ -821,8 +821,9 @@ class SimpleRCS:
         Generates Reverse Delta.
         If inputs are bytes (or BinaryIO), generates BSDIFF delta (base64 encoded).
         If inputs are strings, generates an RCS-style ('diff -n') Reverse Delta.
-        BinaryIO inputs are passed directly to StreamSequenceMatcher (text path) or
-        read once via .read() (binary path, pybsdiff requires bytes).
+        BinaryIO inputs are passed directly to the active text matcher (text path,
+        see matchers.py) or read once via .read() (binary path, pybsdiff requires
+        bytes).
         """
         new_is_stream = hasattr(new_data, "read")
         old_is_stream = hasattr(old_data, "read")
@@ -847,7 +848,7 @@ class SimpleRCS:
         new_stream = io.BytesIO(new_data.encode(self.encoding))
         old_stream = old_data if old_is_stream else io.BytesIO(old_data.encode(self.encoding))
 
-        matcher = StreamSequenceMatcher(new_stream, old_stream, chunk_size=None)
+        matcher = new_matcher(new_stream, old_stream)
         output = []
 
         # opcodes: describes how to turn 'a' (New) into 'b' (Old)

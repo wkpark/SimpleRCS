@@ -73,13 +73,20 @@ Updated from the original design comparison (see [PR #2](https://github.com/wkpa
 | Diff engine | Greedy hash-matching (`StreamSequenceMatcher`, O(N)); Cython-accelerated Myers SES/DMP available for benchmarking | Standard `diff` | `xdiff` (Myers-based) | N/A |
 | Complexity | Low (single class, no object graph) | Medium (custom grammar) | High (complex object model) | Low (SQL) |
 
-**Note on the diff engine:** the production `commit()`/`checkout()` path uses a
-fast, greedy O(N) hash-matching algorithm (`StreamSequenceMatcher`) that
-favors speed over minimal edit distance. The repository also ships
-Cython-accelerated Myers SES/DMP implementations (15–26x faster than their
-pure-Python equivalents) that guarantee a shortest edit script; they are
-currently exercised through `tools/bench_diff.py` for comparison rather than
-wired into the default commit path.
+**Note on the diff engine:** `commit()` picks its text-diff backend at import
+time. When the Cython Myers matchers were compiled — which happens
+automatically on install if a C toolchain is available — they are used, giving
+a shortest edit script. Otherwise it falls back to `StreamSequenceMatcher`, a
+greedy O(N) hash-matching algorithm that favors speed over minimal edit
+distance. Either way the install succeeds and histories stay compatible: block
+hashes cover logical content, not the stored delta bytes.
+
+Set `SIMPLE_RCS_MATCHER` to force a specific backend — `dmp_cython`,
+`ses_cython`, `stream`, `dmp_py`, `ses_py`. The names match the ids
+`tools/bench_diff.py` prints, so you can benchmark and then pin the winner.
+The `*_py` backends are first-cut reference implementations kept for
+comparison; they hit an O(ND) worst case on dissimilar inputs and are never
+chosen by fallback.
 
 ## Usage
 
@@ -176,12 +183,19 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 | Diff 엔진 | 그리디 해시 매칭(`StreamSequenceMatcher`, O(N)); Cython 가속 Myers SES/DMP는 벤치마크용으로 별도 제공 | 표준 `diff` | `xdiff`(Myers 기반) | 해당 없음 |
 | 복잡도 | 낮음(단일 클래스, 객체 그래프 없음) | 중간(전용 문법) | 높음(복잡한 객체 모델) | 낮음(SQL) |
 
-**Diff 엔진 관련 참고:** 실제 `commit()`/`checkout()` 경로는 최소 편집
-거리보다 속도를 우선하는 빠른 그리디 O(N) 해시 매칭 알고리즘
-(`StreamSequenceMatcher`)을 사용한다. 저장소에는 최단 편집 스크립트를
-보장하는 Cython 가속 Myers SES/DMP 구현(순수 Python 대비 15~26배 빠름)도
-포함되어 있지만, 현재는 기본 커밋 경로가 아니라 `tools/bench_diff.py`를
-통한 비교/벤치마크 용도로만 쓰인다.
+**Diff 엔진 관련 참고:** `commit()`은 import 시점에 텍스트 diff
+백엔드를 결정한다. Cython Myers 매처가 컴파일된 경우 — C 툴체인이
+있는 환경에서는 설치 시 자동으로 빌드된다 — 그걸 사용해 최단 편집
+스크립트를 얻고, 없으면 `StreamSequenceMatcher`(최소 편집 거리보다 속도를
+우선하는 그리디 O(N) 해시 매칭)로 폴백한다. 어느 쪽이든 설치는 성공하고
+기존 이력도 그대로 읽힌다 — 블록 해시는 저장된 델타 바이트가 아니라
+논리적 내용을 덮기 때문이다.
+
+`SIMPLE_RCS_MATCHER`로 백엔드를 직접 지정할 수 있다 — `dmp_cython`,
+`ses_cython`, `stream`, `dmp_py`, `ses_py`. 이름은 `tools/bench_diff.py`가
+출력하는 id와 같아서, 벤치를 돌린 뒤 승자를 그대로 고정하면 된다.
+`*_py` 백엔드는 초기 구현 레퍼런스로 비교용으로만 남겨둔 것이고,
+비유사 입력에서 O(ND) 최악을 밟아 폴백 대상이 되지는 않는다.
 
 ## 사용법
 
