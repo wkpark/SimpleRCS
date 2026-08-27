@@ -1,4 +1,5 @@
 import difflib
+import errno
 import hashlib
 import io
 import logging
@@ -1269,6 +1270,57 @@ class SimpleRCS:
             result += "\n"
         return result
 
+    # Errnos that mean "the space really is not there". Anything else from
+    # posix_fallocate() means the filesystem cannot reserve, not that it is full.
+    _NO_SPACE_ERRNOS = frozenset(
+        e for e in (getattr(errno, name, None) for name in ("ENOSPC", "EDQUOT", "EFBIG")) if e is not None
+    )
+
+    def _reserve_space(self, target_size: int) -> None:
+        """Reserve blocks for an upcoming HEAD rewrite, before the first destructive byte.
+
+        Rewriting HEAD overwrites the old block in place, so a write that dies of
+        ENOSPC halfway leaves the file with neither the old nor the new HEAD.
+        posix_fallocate() moves that failure ahead of the write: it either reserves
+        the blocks or raises, and on failure the file is left byte-identical.
+
+        No-ops when the reservation cannot be made *or asked for*:
+        - the platform has no posix_fallocate() (Windows);
+        - the stream has no file descriptor (BytesIO);
+        - the filesystem rejects the request (EOPNOTSUPP on some tmpfs/network mounts).
+        Those callers keep the previous behaviour rather than losing the ability to commit.
+
+        Note that posix_fallocate() extends the file when target_size is past EOF.
+        Callers must only reserve up to the end of the region they are about to
+        overwrite, so the zero-filled extension is never visible after the write.
+        """
+        if not hasattr(os, "posix_fallocate"):
+            return
+        try:
+            fd = self.stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            # io.UnsupportedOperation (BytesIO), or a closed/detached stream.
+            return
+        try:
+            os.posix_fallocate(fd, 0, target_size)
+        except OSError as exc:
+            if exc.errno in self._NO_SPACE_ERRNOS:
+                raise
+            logger.debug("posix_fallocate not usable here (errno %s); skipping reservation", exc.errno)
+
+    def _rewrite_head(self, payload: bytes) -> None:
+        """Replace the tail of the stream, from the current HEAD's start, with payload.
+
+        This is the one destructive operation in the format: it seeks backwards over
+        live data and overwrites it. Both callers (commit() and sign_head()) go
+        through here so the space reservation covers every such write.
+        """
+        start = self.head_info["start"]
+        self._reserve_space(start + len(payload))
+        self.stream.seek(start)
+        self.stream.write(payload)
+        self.stream.truncate()  # Crucial: remove any leftover
+
     def _format_block(
         self,
         data: dict,
@@ -1535,9 +1587,7 @@ class SimpleRCS:
 
         # Single write() call: two separate writes would leave the file with an
         # overwritten old HEAD but no new HEAD if the process dies in between.
-        self.stream.seek(self.head_info["start"])
-        self.stream.write(old_block_bytes + new_block_bytes)
-        self.stream.truncate()  # Crucial: remove any leftover
+        self._rewrite_head(old_block_bytes + new_block_bytes)
 
         return new_ver
 
@@ -1958,9 +2008,7 @@ class SimpleRCS:
             signatures=all_signatures,
         )
 
-        self.stream.seek(self.head_info["start"])
-        self.stream.write(block_bytes)
-        self.stream.truncate()  # Ensure no leftover if new block is shorter (unlikely here)
+        self._rewrite_head(block_bytes)
 
         # Refresh head_info so instance state reflects new signatures
         self._load_head()
