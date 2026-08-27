@@ -4,6 +4,8 @@ import io
 import logging
 import os
 import re
+import stat
+import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from typing import BinaryIO
@@ -83,7 +85,12 @@ class SimpleRCS:
         -   Snapshots are marked by the `text` keyword (instead of `delta`).
     """
 
-    def __init__(self, content_or_path: str | bytes | BinaryIO | None = None, hash_algo: str = "sha256") -> None:  # noqa: C901
+    def __init__(  # noqa: C901
+        self,
+        content_or_path: str | bytes | BinaryIO | None = None,
+        hash_algo: str = "sha256",
+        durable: bool = True,
+    ) -> None:
         """
         Initializes the SimpleRCS instance.
 
@@ -96,12 +103,19 @@ class SimpleRCS:
                 - file-like object: Uses the provided binary stream directly.
             hash_algo: Hash algorithm to use for new v2 files (default: "sha256").
                        Must be supported by hashlib.
+            durable: fsync writes before reporting a commit as done. Only meaningful
+                     for the file-path backend, whose commits are installed with
+                     os.replace(): the replace is atomic either way, but without the
+                     fsync a power cut can still lose it. Turn it off for bulk work
+                     (benchmarks, migrations) where the caller can redo the batch --
+                     see _atomic_rewrite_head for what it costs.
         """
         self.file_path: str | None = None
         self.stream: BinaryIO
         self.owns_handle = False  # Flag to indicate if we opened the file handle and should close it
         self._version = 1  # Default to v1
         self._hash_algo = hash_algo
+        self._durable = durable
         self.encoding = "utf-8"
 
         # Validate hash_algo early
@@ -126,7 +140,10 @@ class SimpleRCS:
                 is_existing = os.path.exists(content_or_path)
                 mode = "rb+" if is_existing else "wb+"
                 self.stream = open(content_or_path, mode)
-                self.file_path = content_or_path
+                # Absolute: commits are installed by writing a temp file next to this
+                # one and renaming over it, so the path has to keep meaning the same
+                # file after a chdir.
+                self.file_path = os.path.abspath(content_or_path)
                 self.owns_handle = True
 
                 # Check if file is empty
@@ -1272,13 +1289,144 @@ class SimpleRCS:
     def _rewrite_head(self, payload: bytes) -> None:
         """Replace the tail of the stream, from the current HEAD's start, with payload.
 
-        This is the one destructive operation in the format: it seeks backwards over
-        live data and overwrites it. Both callers (commit() and sign_head()) go
-        through here so that anything guarding that write only has to be written once.
+        Both callers (commit() and sign_head()) go through here, so this is where
+        the choice between the two strategies lives:
+
+        - A file we opened ourselves is rewritten into a temp file and installed
+          with os.replace(), which is atomic. Nothing live is ever overwritten.
+        - Anything else -- a caller-supplied stream, BytesIO -- keeps the in-place
+          rewrite. There is no path to rename over, and for BytesIO durability is
+          not a question the caller can be asking.
         """
-        self.stream.seek(self.head_info["start"])
+        start = self.head_info["start"]
+        if self.file_path is not None and self.owns_handle:
+            self._atomic_rewrite_head(payload, self.file_path, start)
+        else:
+            self._rewrite_head_in_place(payload, start)
+
+    def _rewrite_head_in_place(self, payload: bytes, start: int) -> None:
+        """Seek back over the live HEAD, overwrite it, drop what is left.
+
+        Destructive: at no point does the stream hold both the old HEAD and the
+        new one, so a write that dies halfway leaves neither. Since every older
+        version is a reverse delta anchored on HEAD, that loses the whole history,
+        not just the version being replaced.
+        """
+        self.stream.seek(start)
         self.stream.write(payload)
         self.stream.truncate()  # Crucial: remove any leftover
+
+    def _copy_prefix(self, dst_fd: int, nbytes: int) -> None:
+        """Copy the first `nbytes` of this stream into `dst_fd`.
+
+        This is what makes rewrite-and-rename affordable for us. RCS pays O(file)
+        per commit because it stores HEAD *first*, so a commit shifts everything
+        after it; we store HEAD last, so everything before it is a byte-identical
+        prefix. Copying it verbatim needs no parsing and no re-serialisation --
+        which is also why we do not inherit RCS's exposure to memory corruption,
+        where the whole history is re-encoded on every commit.
+
+        os.sendfile() reads from the raw descriptor, which does not see the
+        stream's own write buffer -- hence the flush. Through commit() the buffer
+        is empty anyway, since _load_head() seeks to the end first and a seek
+        flushes a BufferedRandom; the flush here is this method's own contract,
+        not a fix for an observed loss.
+
+        os.copy_file_range() would be the more obvious call -- and would turn into
+        a reflink on btrfs/XFS -- but it is absent from some CPython builds (the
+        interpreter uv ships has neither it nor os.fallocate), and on ext4 it
+        measured no faster than sendfile. sendfile is present wherever we run.
+        EINTR needs no handling here: PEP 475 makes Python retry it.
+        """
+        self.stream.flush()
+        src_fd = self.stream.fileno()
+        offset = 0
+        while offset < nbytes:
+            sent = os.sendfile(dst_fd, src_fd, offset, nbytes - offset)
+            if sent == 0:
+                raise OSError(f"short copy of history: wanted {nbytes} bytes, stopped at {offset}")
+            offset += sent
+
+    @staticmethod
+    def _write_all(fd: int, data: bytes) -> None:
+        """os.write() may write less than asked; keep going until it is all out."""
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+
+    @staticmethod
+    def _fsync_directory(path: str) -> None:
+        """Make a rename in `path` durable, not just the file's contents.
+
+        No-op where a directory cannot be opened for reading (Windows), which is
+        also where the guarantee does not apply in this form.
+        """
+        try:
+            dir_fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _fsync_stream(self) -> None:
+        """Flush and fsync the stream, if it is backed by a descriptor at all."""
+        self.stream.flush()
+        try:
+            fd = self.stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            return  # io.UnsupportedOperation (BytesIO), or a detached stream
+        os.fsync(fd)
+
+    def _atomic_rewrite_head(self, payload: bytes, file_path: str, start: int) -> None:
+        """Install a new HEAD by rewriting the file beside itself and renaming.
+
+        The old file is untouched until os.replace(), which either happens or does
+        not -- so an interrupted commit costs the commit, never the history. The
+        cost is one copy of everything before HEAD (see _copy_prefix) plus, when
+        `durable` is set, an fsync of the temp file and of the directory.
+
+        The stream is closed before the replace and reopened after. On POSIX it
+        could stay open, but Windows refuses to replace a file that has an open
+        handle, and one order satisfies both.
+        """
+        directory = os.path.dirname(file_path)
+        prefix = os.path.basename(file_path) + "."
+
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=prefix, suffix=".tmp")
+        tmp_path: str | None = tmp_name
+        try:
+            try:
+                # mkstemp creates 0600. Carry over what the real file has instead,
+                # since os.replace installs a new inode and the old mode with it.
+                os.fchmod(tmp_fd, stat.S_IMODE(os.fstat(self.stream.fileno()).st_mode))
+                self._copy_prefix(tmp_fd, start)
+                self._write_all(tmp_fd, payload)
+                if self._durable:
+                    os.fsync(tmp_fd)
+            finally:
+                os.close(tmp_fd)
+
+            self.stream.close()
+            try:
+                os.replace(tmp_name, file_path)
+                tmp_path = None  # it is the real file now; nothing left to clean up
+            finally:
+                # Reopen either way: on success this is the new file, on failure the
+                # untouched original. Leaving the instance without a stream would be
+                # worse than whatever went wrong.
+                self.stream = open(file_path, "rb+")
+        finally:
+            if tmp_path is not None:
+                os.unlink(tmp_path)
+
+        # The cached head_info is keyed on file size (see _load_head); a rewrite
+        # that happens to land on the same size would otherwise keep the old HEAD.
+        self._load_head(force=True)
+
+        if self._durable:
+            self._fsync_directory(directory)
 
     def _format_block(
         self,
@@ -1423,6 +1571,15 @@ class SimpleRCS:
                     block_data, current_hash=curr_hash, signatures=signatures, is_delta=False, encoding=encoding
                 )
             )
+
+            # The first commit appends past EOF, so it destroys nothing and needs no
+            # temp file. It still has to be made durable, or `durable` would promise
+            # something the very first commit does not deliver. The directory fsync
+            # is for the file itself: on this path it may have just been created.
+            if self._durable:
+                self._fsync_stream()
+                if self.file_path is not None:
+                    self._fsync_directory(os.path.dirname(self.file_path))
 
             return new_ver
 
