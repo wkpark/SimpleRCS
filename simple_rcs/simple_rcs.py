@@ -13,6 +13,20 @@ from .matchers import new_matcher
 
 logger = logging.getLogger(__name__)
 
+#: What a block starts with. `_format_block` has only ever written "ver"
+#: (`keys = ["ver", ...]` since the initial commit); "version" was accepted by
+#: the readers "for backward compatibility" with a writer that never existed,
+#: and searching for it doubled the false-positive surface for nothing.
+_BLOCK_MARKER = b"ver @"
+
+# _is_block_boundary reads this much at a candidate: the 2-byte blank line
+# before the marker, the marker itself, and one byte after its '@'.
+_BOUNDARY_WINDOW = 2 + len(_BLOCK_MARKER) + 1
+
+# Re-read this much of the previous chunk so a marker split across a chunk
+# boundary is still found whole.
+_SCAN_OVERLAP = len(_BLOCK_MARKER) - 1
+
 _ESCAPED_TAG = codec.ESCAPED.encode("ascii")
 
 
@@ -163,24 +177,24 @@ class SimpleRCS:
 
     def _is_block_boundary(self, abs_start: int, buf: bytes | None = None, buf_origin: int = 0) -> bool:
         """True if `abs_start` is a genuine block-start offset, not a
-        coincidental "ver @"/"version @" match inside escaped block content.
+        coincidental "ver @" match inside escaped block content.
 
         `_format_block` always writes a block as `"\\n".join(lines) +
         "\\n\\n"`, so every real block (except the very first, which follows
         the v2 header or starts at offset 0 for v1 — see `_data_start`) is
         immediately preceded by a blank line. `_load_head`/`_get_prev_block`
         locate candidate block starts by scanning raw bytes for the literal
-        marker "ver @"/"version @", but `codec.escape` only doubles '@' —
-        it does not protect that 5/9-byte sequence from occurring inside an
-        escaped field value (e.g. a log message or page body containing
-        "whoever @admin" or "changelog: version @2"). Requiring the blank
+        marker "ver @", but `codec.escape` only doubles '@' — it does not
+        protect that 5-byte sequence from occurring inside an escaped field
+        value (e.g. a log message or page body containing "whatever @2").
+        Requiring the blank
         line immediately before a candidate rules out that class of false
         positives on its own.
 
         This check alone is NOT sufficient, though: `codec.escape` doesn't
         escape newlines either, so ordinary content containing a literal
-        blank line immediately followed by "ver @"/"version @" (e.g. wiki
-        prose like "...\\n\\nversion @2.0 release notes...") still passes
+        blank line immediately followed by "ver @" (e.g. wiki prose like
+        "...\\n\\nwhatever @2.0 release notes...") still passes
         it. Callers close that gap themselves by re-scanning further left
         whenever parsing what looked like a valid boundary still fails —
         see `_scan_for_block`. Only content that reproduces *both* the
@@ -197,19 +211,38 @@ class SimpleRCS:
             return True
         if abs_start < 2:
             return False
+        # The blank line before the marker, plus enough after it to see whether
+        # the marker's '@' opens a run: from `buf` when it holds the window,
+        # else from the stream.
+        window = None
         if buf is not None:
             rel = abs_start - 2 - buf_origin
-            if 0 <= rel and rel + 2 <= len(buf):
-                return buf[rel : rel + 2] == b"\n\n"
-        pos = self.stream.tell()
-        self.stream.seek(abs_start - 2)
-        is_boundary = self.stream.read(2) == b"\n\n"
-        self.stream.seek(pos)
-        return is_boundary
+            if 0 <= rel and rel + _BOUNDARY_WINDOW <= len(buf):
+                window = buf[rel : rel + _BOUNDARY_WINDOW]
+        if window is None:
+            pos = self.stream.tell()
+            self.stream.seek(abs_start - 2)
+            window = self.stream.read(_BOUNDARY_WINDOW)
+            self.stream.seek(pos)
+        if not window.startswith(b"\n\n"):
+            return False
+        # '@' parity. Every '@' inside a field value is doubled, so a run there
+        # is always even; a delimiter is a single '@', and a version never
+        # starts with one, so a real marker's run is exactly 1. Reading one byte
+        # past the marker's '@' separates them:
+        #
+        #   ver @1.1@;    run = 1  -> delimiter, a real block starts here
+        #   ver @@@@;     run = 4  -> inside an escaped value, keep scanning
+        #
+        # This is exact wherever every field is escaped -- which is what the
+        # 'esc' encoding is for. A base85 or raw payload is stored unescaped and
+        # can still put an odd run inside a value, so there the check only
+        # narrows the candidates and _scan_for_block's retry does the rest.
+        return not window[2:].startswith(b"ver @@")
 
     def _scan_for_block(self, buf: bytes, limit: int, buf_origin: int) -> int:
         """Rightmost offset in `buf[:limit]` (`buf_origin` = the stream
-        offset `buf[0]` corresponds to) where "ver @"/"version @" marks a
+        offset `buf[0]` corresponds to) where "ver @" marks a
         genuine block boundary per `_is_block_boundary`, or -1 if none.
 
         Does not attempt to parse. A candidate that passes the boundary
@@ -219,7 +252,7 @@ class SimpleRCS:
         of treating a merely-structurally-plausible offset as the answer.
         """
         while True:
-            idx = max(buf.rfind(b"ver @", 0, limit), buf.rfind(b"version @", 0, limit))
+            idx = buf.rfind(_BLOCK_MARKER, 0, limit)
             if idx == -1 or self._is_block_boundary(buf_origin + idx, buf, buf_origin):
                 return idx
             limit = idx
@@ -355,14 +388,12 @@ class SimpleRCS:
         data = {}
         # Regex matches keys (ver, date, etc.) and values enclosed in @...@
         # Use re.DOTALL to match newlines within @...@
-        pattern = re.compile(r"(ver|version|date|author|log|text|delta|binary)\s+@((?:[^@]|@@)*)@;", re.DOTALL)
+        pattern = re.compile(r"(ver|date|author|log|text|delta|binary)\s+@((?:[^@]|@@)*)@;", re.DOTALL)
 
         # Iterate over all matches to build the data dictionary
         for match in pattern.finditer(content_str):
             key = match.group(1)
             value = self._unescape(match.group(2))
-            if key == "version":
-                key = "ver"  # Normalize key
 
             # `ver` is always a block's first field (see _format_block), so a
             # second one starts the *next* block. Callers may hand us a range
@@ -414,7 +445,6 @@ class SimpleRCS:
         # Added 'delta' for mixed snapshot support
         _keywords = [
             b"ver",
-            b"version",
             b"date",
             b"author",
             b"log",
@@ -454,7 +484,7 @@ class SimpleRCS:
             # fields overwrite this one's. Kept identical in
             # _parse_block_content (the reference parser) -- see
             # test_parse_block_content_matches_no_regex.
-            if key_bytes in (b"ver", b"version") and "ver" in data:
+            if key_bytes == b"ver" and "ver" in data:
                 break
 
             # Skip whitespace after key
@@ -564,8 +594,6 @@ class SimpleRCS:
 
             # Store data based on key and parsing strategy
             key_str = key_bytes.decode(self.encoding)
-            if key_str == "version":
-                key_str = "ver"  # Normalize key
 
             if key_str == "binary":
                 # Binary data is always length-prefixed and decoded.
@@ -626,7 +654,7 @@ class SimpleRCS:
           content_stream_offset, content_length, content_encoding  (for lazy checkout)
         """
         CHUNK = 8192
-        _meta_kw = {b"ver", b"version", b"date", b"author", b"log", b"prev_hash", b"hash", b"signature"}
+        _meta_kw = {b"ver", b"date", b"author", b"log", b"prev_hash", b"hash", b"signature"}
         _skip_kw = {b"binary", b"text", b"delta"}
         _all_kw = _meta_kw | _skip_kw
 
@@ -683,7 +711,7 @@ class SimpleRCS:
             # following block's start) rather than to this block's own end --
             # stop here so the next block's fields can't overwrite this one's,
             # matching both content parsers.
-            if key_bytes in (b"ver", b"version") and "ver" in data:
+            if key_bytes == b"ver" and "ver" in data:
                 break
 
             # skip whitespace before '@'
@@ -737,8 +765,6 @@ class SimpleRCS:
                     break
 
                 key_str = key_bytes.decode()
-                if key_str == "version":
-                    key_str = "ver"
                 if key_str == "signature":
                     data.setdefault("signatures", []).append(value)
                 else:
@@ -895,7 +921,7 @@ class SimpleRCS:
             return
 
         CHUNK = 4096
-        OVERLAP = 8  # len("version @") - 1
+        OVERLAP = _SCAN_OVERLAP
 
         pos = file_size
         # collected: chunks in right-to-left read order (index 0 = rightmost / EOF side).
@@ -998,7 +1024,7 @@ class SimpleRCS:
             # into `chunk`.
             limit_in_chunk = current_start_offset - scan_pos
 
-            # Search for a genuine block boundary (`ver @`/`version @`) in
+            # Search for a genuine block boundary (`ver @`) in
             # `chunk` up to `limit_in_chunk`, retrying further left within
             # this same buffer whenever a candidate doesn't pan out — either
             # it's a false positive (see _is_block_boundary) or it passed
