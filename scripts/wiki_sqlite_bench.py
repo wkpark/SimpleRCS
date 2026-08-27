@@ -77,6 +77,7 @@ for i in range(N):
     content = "\n".join(lines) + "\n"
 
     head_start_before = rcs.head_info["start"]  # byte offset that commit() will seek-back to
+    prev_ver = ver
     ver = rcs.commit(content, author="wkpark", log=f"rev{i}")
     rcs._load_head(force=True)  # refresh so next iteration's head_start_before is accurate
     full_blob = rcs.stream.getvalue()
@@ -97,8 +98,11 @@ for i in range(N):
     # --- Design B proxy: only the changed tail as a normalized row op ---
     t0 = time.perf_counter()
     conn.execute(
-        "UPDATE revisions SET block_bytes=? WHERE page_id=1 AND version=(SELECT MAX(version) FROM revisions WHERE page_id=1)",  # noqa: E501
-        (tail_bytes[: len(tail_bytes) // 2],),  # placeholder: former-HEAD-as-delta half (approx)
+        # Match on the tracked previous version, not MAX(version): version
+        # strings are RCS-style ("1.9" precedes "1.10"), so a lexicographic
+        # MAX() picks the wrong row once the minor number reaches two digits.
+        "UPDATE revisions SET block_bytes=? WHERE page_id=1 AND version=?",
+        (tail_bytes[: len(tail_bytes) // 2], prev_ver),  # placeholder: former-HEAD-as-delta half (approx)
     )
     conn.execute(
         "INSERT INTO revisions (page_id, version, block_bytes, author, log, date) VALUES (1,?,?,?,?,?)",
