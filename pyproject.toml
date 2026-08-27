@@ -1,25 +1,46 @@
 [project]
 name = "simple_rcs"
-version = "0.1.0"
-description = "SimpleRCS version control system"
+dynamic = ["version"]
+description = "Dependency-free reverse-delta version control for single files, with an RCS-inspired plain-text format, a hash chain, and optional GPG signatures"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = []
+keywords = ["rcs", "version-control", "delta", "diff", "bsdiff", "revision", "history"]
 
 authors = [
     {name = "Won-Kyu Park",email = "wkpark@gmail.com"},
 ]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control",
+    "Topic :: System :: Archiving",
+]
+
+[project.urls]
+Homepage = "https://github.com/wkpark/SimpleRCS"
+Documentation = "https://github.com/wkpark/SimpleRCS/wiki"
+Issues = "https://github.com/wkpark/SimpleRCS/issues"
 
 [dependency-groups]
 dev = [
     "ruff>=0.11.8",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
+    "Cython>=3.0",     # builds the benchmark-only matchers; see scripts/build_ext.sh
+    "setuptools",      # cythonize needs the distutils shim on Python 3.12+
 ]
 
 [tool.ruff]
 line-length = 120
-target-version = "py313"
+target-version = "py310"  # matches requires-python; keeps pyupgrade from emitting 3.11+ syntax
 
 exclude = [
     ".git",
@@ -60,31 +81,22 @@ ignore = [
     "T201",  # print — intentional in benchmarks and compat tests
 ]
 
-[tool.hatch.build]
-dev-mode-dirs = ["simple_rcs"]
-dev-mode-exact = true
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The Cython matchers (simple_rcs/_myersdiff_*.pyx) are benchmark-only: nothing
+# under simple_rcs/ imports them, and tools/bench_diff.py already skips them
+# when they are absent. Shipping them would force a C toolchain on every
+# installer for no runtime gain, so the distribution is pure Python and the
+# .pyx sources stay a local build (see AGENTS.md and tools/bench_diff.py).
+[tool.hatch.version]
+path = "simple_rcs/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["simple_rcs"]
+exclude = ["*.pyx", "*.c", "*.so"]
 
 [tool.hatch.build.targets.sdist]
-ignore-vcs = true
-only-include = ["simple_rcs", "README.md", "LICENSE"]
-
-[build-system]
-requires = ["setuptools", "Cython"]
-build-backend = "setuptools.build_meta"
-#requires = ["hatchling"]
-#build-backend = "hatchling.build"
-
-[tool.setuptools]
-package-dir = {"simple_rcs" = "simple_rcs"}
-ext-modules = [
-  {name = "simple_rcs._myersdiff_ses", sources = ["simple_rcs/_myersdiff_ses.pyx"]},
-  {name = "simple_rcs._myersdiff_dmp", sources = ["simple_rcs/_myersdiff_dmp.pyx"]},
-]
-
-[tool.uv.build-backend]
-# for uv_build backend
-module-name = "simple_rcs"
-module-root = "."
+only-include = ["simple_rcs", "tests", "README.md", "LICENSE"]
+exclude = ["*.c", "*.so"]

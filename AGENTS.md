@@ -14,12 +14,16 @@ hash chain, and optional GPG signatures. Python >= 3.13, environment managed by
 ```bash
 uv run pytest tests/unit_tests/ -q     # full test suite (~30s) — must stay green
 uv run ruff check                      # lint — must stay clean (line-length 120)
+uv run scripts/build_ext.py            # build the benchmark-only Cython matchers
 uv run tools/bench_diff.py             # compare all diff engines (time + memory)
 uv run tools/srcs_commit.py FILE -m "msg" --no-sign   # CLI smoke test
 ```
 
-The Cython extensions (`simple_rcs/_myersdiff_{ses,dmp}.pyx`) are built by the
-setuptools backend on install (`uv sync`). Rebuild after editing `.pyx` files.
+The Cython extensions (`simple_rcs/_myersdiff_{ses,dmp}.pyx`) are **not** built
+on install and are **not** part of the published distribution — nothing under
+`simple_rcs/` imports them, so the wheel stays pure Python. They exist for the
+benchmark tools. Build them in place with `uv run scripts/build_ext.py`, and
+rebuild after editing a `.pyx` file.
 
 ## Layout
 
@@ -30,7 +34,7 @@ setuptools backend on install (`uv sync`). Rebuild after editing `.pyx` files.
 | `simple_rcs/pydifflib.py` | `StreamSequenceMatcher` — the production text-diff engine (hash-based greedy + difflib refinement) |
 | `simple_rcs/pybsdiff.py` | BSDIFF-style binary deltas |
 | `simple_rcs/myersdiff*.py` | Pure-Python Myers variants (reference / benchmarking) |
-| `simple_rcs/_myersdiff_{ses,dmp}.pyx` | Cython Myers matchers — built and benchmarked, **not yet wired into the library hot path** |
+| `simple_rcs/_myersdiff_{ses,dmp}.pyx` | Cython Myers matchers — benchmarked only, **not wired into the library hot path** and excluded from the distribution |
 | `simple_rcs/adapters.py` | File-like adapter for psycopg2 large objects |
 | `simple_rcs/simple_rcs_gpg.py` | GPG sign/verify callbacks used by the CLIs |
 | `tools/` | CLI scripts (`srcs_commit/log/diff/blame/verify/sign_head`, benchmarks) — run from repo root via `uv run tools/...` |
