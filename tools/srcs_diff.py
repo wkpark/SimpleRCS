@@ -205,9 +205,13 @@ def main() -> None:
                 # same way from the same directory; an absolute one cannot
                 # appear in a patch, so fall back to the bare name.
                 patch_path = str(target_path) if not target_path.is_absolute() else target_path.name
-                sys.stdout.write(
-                    gitpatch.binary_patch(patch_path, as_bytes(content_a), as_bytes(content_b))
-                )
+                # Line by line: a literal block restates the whole file, so
+                # building the patch as one string would hold several copies of
+                # it at once. stdout is buffered, so this is not more syscalls.
+                for line in gitpatch.iter_binary_patch(
+                    patch_path, as_bytes(content_a), as_bytes(content_b)
+                ):
+                    sys.stdout.write(line + "\n")
             else:
                 print(f"Binary files {label_a} and {label_b} differ")
             # diff(1) semantics (1 = they differ) are wrong for --binary: the

@@ -7,8 +7,10 @@ which part broke rather than just "git refused it".
 """
 
 import base64
+import os
 import shutil
 import subprocess
+import tracemalloc
 import zlib
 
 import pytest
@@ -181,3 +183,46 @@ def test_git_applies_a_patch_for_a_path_it_has_to_quote(tmp_path):
 
     git("apply", "-R", "out.patch")
     assert target.read_bytes() == OLD
+
+
+def test_the_generator_and_the_string_form_agree():
+    lines = list(gitpatch.iter_binary_patch("f.bin", OLD, NEW))
+
+    assert "\n".join(lines) + "\n" == gitpatch.binary_patch("f.bin", OLD, NEW)
+
+
+def test_the_generator_yields_nothing_for_identical_revisions():
+    assert list(gitpatch.iter_binary_patch("f.bin", OLD, OLD)) == []
+
+
+def test_streaming_the_lines_costs_a_fraction_of_building_the_string():
+    """The reason iter_binary_patch exists. A literal block restates the whole
+    file, so the string form holds the deflated payload, the base85 lines and
+    the joined result at once; consuming lines keeps only one line alive.
+
+    Measured on this payload: streaming 0.22, materialising one block at a time
+    0.30, materialising the whole patch 0.51. The threshold catches the last of
+    those -- a generator that builds everything before yielding, which is what
+    binary_patch already does and what this function exists not to do. It does
+    not catch per-block materialisation; separating that needs a threshold too
+    close to the measured value to hold across platforms.
+    """
+    # Incompressible on purpose: a payload that deflates to almost nothing
+    # leaves nothing to save, and this test would pass while measuring nothing.
+    # The ratio is structural, not data-dependent, so the bytes need not be
+    # reproducible -- only incompressible.
+    payload = os.urandom(256 << 10)  # big enough for a wide margin, small enough to stay quick
+    changed = payload[: len(payload) // 2] + b"edit" + payload[len(payload) // 2 + 4 :]
+
+    tracemalloc.start()
+    gitpatch.binary_patch("f.bin", payload, changed)
+    _, joined_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    tracemalloc.start()
+    for _line in gitpatch.iter_binary_patch("f.bin", payload, changed):
+        pass
+    _, streamed_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert streamed_peak < joined_peak * 0.4, f"streamed={streamed_peak} joined={joined_peak}"

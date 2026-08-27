@@ -20,6 +20,7 @@ encoding.
 import base64
 import hashlib
 import zlib
+from collections.abc import Iterator
 
 #: git's own limit: one line carries at most 52 decoded bytes.
 _MAX_BYTES_PER_LINE = 52
@@ -86,44 +87,52 @@ def _length_prefix(n: int) -> str:
     raise ValueError(f"line length {n} outside git's 1..{_MAX_BYTES_PER_LINE}")
 
 
-def _base85_lines(payload: bytes) -> list[str]:
+def _base85_lines(payload: bytes) -> Iterator[str]:
     """git's line-framed base85: length letter, then the encoded group."""
-    lines = []
     for start in range(0, len(payload), _MAX_BYTES_PER_LINE):
         chunk = payload[start : start + _MAX_BYTES_PER_LINE]
         # Encode whole 4-byte groups; the decoder takes only the first
         # len(chunk) bytes back, so the padding never reaches the file.
         padded = chunk + b"\0" * (-len(chunk) % 4)
-        lines.append(_length_prefix(len(chunk)) + base64.b85encode(padded).decode("ascii"))
-    return lines
+        yield _length_prefix(len(chunk)) + base64.b85encode(padded).decode("ascii")
 
 
-def _literal_block(data: bytes) -> list[str]:
+def _literal_block(data: bytes) -> Iterator[str]:
     """A ``literal`` block: the whole file, deflated and base85-framed.
 
     The count on the header line is the *inflated* size, which is how git knows
     what it should end up with.
     """
-    return [f"literal {len(data)}", *_base85_lines(zlib.compress(data)), ""]
+    yield f"literal {len(data)}"
+    yield from _base85_lines(zlib.compress(data))
+    yield ""
 
 
-def binary_patch(path: str, old: bytes, new: bytes, mode: str = "100644") -> str:
-    """A ``git apply``-able patch turning `old` into `new` at `path`.
+def iter_binary_patch(path: str, old: bytes, new: bytes, mode: str = "100644") -> Iterator[str]:
+    """The patch as lines, without their newlines. Yields nothing when the two
+    versions are identical, matching git, which prints nothing for an unchanged
+    file.
+
+    A literal block restates the whole file, so the patch is larger than the
+    revisions it carries. Consuming it line by line keeps the base85 text out of
+    memory; :func:`binary_patch` is the convenience wrapper for callers small
+    enough not to care.
 
     `path` is quoted the way git quotes it, so a name carrying a newline cannot
     forge patch content -- see :func:`_quote_path`.
 
-    Emits the reverse block as well, so ``git apply -R`` undoes it. Returns an
-    empty string when the two versions are identical, matching git, which
-    prints nothing for an unchanged file.
+    The reverse block is emitted as well, so ``git apply -R`` undoes the patch.
     """
     if old == new:
-        return ""
-    lines = [
-        f"diff --git {_quote_path('a/' + path)} {_quote_path('b/' + path)}",
-        f"index {blob_id(old)}..{blob_id(new)} {mode}",
-        "GIT binary patch",
-        *_literal_block(new),  # forward: what `git apply` installs
-        *_literal_block(old),  # reverse: what `git apply -R` restores
-    ]
-    return "\n".join(lines) + "\n"
+        return
+    yield f"diff --git {_quote_path('a/' + path)} {_quote_path('b/' + path)}"
+    yield f"index {blob_id(old)}..{blob_id(new)} {mode}"
+    yield "GIT binary patch"
+    yield from _literal_block(new)  # forward: what `git apply` installs
+    yield from _literal_block(old)  # reverse: what `git apply -R` restores
+
+
+def binary_patch(path: str, old: bytes, new: bytes, mode: str = "100644") -> str:
+    """:func:`iter_binary_patch` as one string, or "" for identical revisions."""
+    lines = list(iter_binary_patch(path, old, new, mode))
+    return "\n".join(lines) + "\n" if lines else ""
