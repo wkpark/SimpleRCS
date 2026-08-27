@@ -27,8 +27,6 @@ _BOUNDARY_WINDOW = 2 + len(_BLOCK_MARKER) + 1
 # boundary is still found whole.
 _SCAN_OVERLAP = len(_BLOCK_MARKER) - 1
 
-_ESCAPED_TAG = codec.ESCAPED.encode("ascii")
-
 
 class SimpleRCSCorruptionError(ValueError):
     """Raised when historical block data cannot be reconstructed because a
@@ -383,6 +381,11 @@ class SimpleRCS:
         callers use instead) -- kept intentionally as a simpler, more readable
         reference implementation of the block format. Covered by
         test_parse_block_content_matches_no_regex to catch drift between the two.
+
+        Limit worth knowing: it works on a decoded ``str``, so it cannot
+        represent a ``raw`` binary payload -- those bytes do not survive
+        ``decode(errors="replace")``. Text, ``base64`` and ``base85`` blocks are
+        exact; the pin test covers those.
         """
         content_str = content_bytes.decode(self.encoding, errors="replace")
         data = {}
@@ -393,7 +396,12 @@ class SimpleRCS:
         # Iterate over all matches to build the data dictionary
         for match in pattern.finditer(content_str):
             key = match.group(1)
-            value = self._unescape(match.group(2))
+            # Binary payloads keep their escaping: codec.decode_binary unescapes
+            # them itself, and the no-regex parser hands them over verbatim from
+            # its length-based read. Unescaping here as well would collapse a
+            # doubled '@' twice.
+            escaped = match.group(2)
+            value = self._unescape(escaped)
 
             # `ver` is always a block's first field (see _format_block), so a
             # second one starts the *next* block. Callers may hand us a range
@@ -403,18 +411,20 @@ class SimpleRCS:
                 break
 
             if key == "delta":
-                data["text"] = value
                 data["is_delta"] = True
-                data["is_binary"] = ";base64," in value or ";base85," in value
+                if codec.binary_tag(escaped) is not None:
+                    # A binary patch. The no-regex parser reads it length-based
+                    # and stores the stored form verbatim; match that.
+                    data["text"] = escaped.encode(self.encoding)
+                    data["is_binary"] = True
+                else:
+                    data["text"] = value
+                    data["is_binary"] = False
             elif key == "text":
                 data["text"] = value
                 data["is_delta"] = False
             elif key == "binary":
-                # For regex parser, we decode eagerly since content_str is already str
-                # But codec.decode_binary expects bytes.
-                # We should re-encode value to bytes or make codec.decode_binary flexible?
-                # codec.decode_binary expects bytes. value is str.
-                data["text"] = codec.decode_binary(value.encode("ascii"))
+                data["text"] = codec.decode_binary(escaped.encode(self.encoding))
                 data["is_delta"] = False
                 data["is_binary"] = True
             elif key == "signature":
@@ -506,7 +516,6 @@ class SimpleRCS:
             is_length_based = False
             data_len = 0
             header_end_idx = -1  # Relative to pos
-            tag_bytes = b""
 
             if allow_length_based:
                 # We peek a small chunk to check for the header.
@@ -524,17 +533,10 @@ class SimpleRCS:
                             comma_idx = peek_chunk.find(b",", semi_idx)
                             if comma_idx != -1:
                                 header_end_idx = comma_idx + 1  # Include comma
-                                tag_bytes = peek_chunk[semi_idx + 1 : comma_idx]
                                 is_length_based = True
                         except ValueError:
                             pass
 
-                # A base64/base85 delta is stored *escaped* by _format_block, so
-                # its header length counts pre-escape bytes and the payload has
-                # to be read delimiter-wise. Only 'esc' records the byte count
-                # that is actually on disk.
-                if is_length_based and key_bytes == b"delta" and tag_bytes != _ESCAPED_TAG:
-                    is_length_based = False
 
             val_parts = []
             if is_length_based:
@@ -822,14 +824,9 @@ class SimpleRCS:
                     is_binary_val = is_len_based
                     if is_len_based:
                         enc_str = peek[semi + 1 : comma].decode("ascii", errors="replace")
-                        # Seek-skip needs the header length to equal the bytes
-                        # actually on disk. base64's charset has no '@', so
-                        # _format_block's escape is a no-op and N is exact;
-                        # 'esc' is escaped by encode_binary and records the
-                        # escaped count, so N is exact there too. base85/raw
-                        # store an unescaped count that _format_block then
-                        # escapes, so N would undershoot the stored bytes.
-                        use_seek_skip = enc_str in ("base64", codec.ESCAPED)
+                        # encode_binary records the byte count that is actually
+                        # on disk for every encoding, so the skip is exact.
+                        use_seek_skip = True
 
                 if use_seek_skip:
                     # base64 binary delta: skip N bytes of encoded content via seek
@@ -1091,14 +1088,12 @@ class SimpleRCS:
                 else (old_data if isinstance(old_data, bytes) else old_data.encode(self.encoding))
             )
             patch_data = pybsdiff.diff(new_bytes, old_bytes)  # New -> Old
-            encoded_bytes = codec.encode_binary(patch_data, encoding=encoding)
-            # base64/base85 are ASCII, so the delta travels as str and
-            # _format_block escapes it. 'esc' keeps the raw bytes -- already
-            # escaped by encode_binary -- so it must stay bytes all the way to
-            # the block writer, which writes it verbatim.
-            if encoding == codec.ESCAPED:
-                return encoded_bytes
-            return encoded_bytes.decode("ascii")
+            # encode_binary already produced the stored form -- payload
+            # escaped, header length counting the escaped bytes -- so it travels
+            # as bytes to the block writer, which writes it verbatim. Escaping
+            # it again there would corrupt it, and a raw payload would not
+            # survive a round trip through str anyway.
+            return codec.encode_binary(patch_data, encoding=encoding)
         elif isinstance(new_data, str) and (isinstance(old_data, str) or old_is_stream):
             pass
         else:
@@ -1296,9 +1291,9 @@ class SimpleRCS:
         content_val = data.get("text", "")
 
         if is_delta and isinstance(content_val, bytes):
-            # An 'esc' binary patch: _generate_reverse_delta already produced the
-            # stored form (payload escaped, header length counting the escaped
-            # bytes), so escaping it again would corrupt it.
+            # A binary patch: _generate_reverse_delta already produced the stored
+            # form (payload escaped, header length counting the escaped bytes),
+            # so escaping it again would corrupt it.
             lines.append(b"delta @" + content_val + b"@;")
         elif isinstance(content_val, bytes):
             # Binary Full Text

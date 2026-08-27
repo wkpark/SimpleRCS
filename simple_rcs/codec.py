@@ -10,16 +10,6 @@ import base64
 import hashlib
 import re
 
-#: Encoding tag for RCS-style storage: raw bytes with '@' doubled.
-#:
-#: Every other field in a block escapes '@', which makes '@' parity a decidable
-#: rule for locating field delimiters. ``base64`` satisfies it for free (its
-#: alphabet has no '@'), but ``base85`` and ``raw`` do not, and their payloads
-#: are stored unescaped -- the one place the rule breaks. ``esc`` is what GNU
-#: RCS does: keep the bytes, double the '@'. Costs ~0.4% instead of base64's
-#: 33%, decodes faster (``bytes.replace`` is C-level), and stays parity-clean.
-ESCAPED = "esc"
-
 #: Header of a length-prefixed binary value: ``<length>;<encoding>,``.
 _BINARY_HEADER = re.compile(rb"\A([0-9]+);([A-Za-z0-9]+),")
 _BINARY_HEADER_STR = re.compile(r"\A([0-9]+);([A-Za-z0-9]+),")
@@ -51,58 +41,53 @@ def unescape_bytes(data: bytes) -> bytes:
 
 
 def encode_binary(data: bytes, encoding: str = "base64") -> bytes:
-    """Encodes binary data to bytes format: <length>;<encoding>,<encoded>
+    """Encodes binary data to bytes format: <length>;<encoding>,<escaped payload>
 
-    The length is always the byte count of what follows the header, so a forward
-    parser can skip the payload in one seek regardless of encoding.
+    Escaping is a property of the *container*, not of the encoding: every value
+    in a block doubles its '@', which is what makes '@' parity a decidable rule
+    for finding field delimiters. So the payload is escaped whatever the
+    encoding is -- a no-op for base64, whose alphabet has no '@'.
+
+    The tag says only how the bytes were encoded, and the length is always the
+    count of what is actually on disk (post-escape), so a forward parser can
+    skip the payload in one seek regardless of encoding.
     """
-    if encoding == ESCAPED:
-        # RCS-style. The length counts the *escaped* bytes, so the seek-skip
-        # stays exact while the doubling keeps '@' parity usable.
-        escaped = escape_bytes(data)
-        return f"{len(escaped)};{ESCAPED},".encode("ascii") + escaped
+    if encoding == "raw":
+        # RCS-style: keep the bytes, let the escaping carry them. ~0.4% overhead
+        # against base64's 33%, and bytes.replace decodes faster than b64decode.
+        payload = data
     elif encoding == "base85":
-        encoded = base64.b85encode(data)
-        return f"{len(encoded)};base85,".encode("ascii") + encoded
-    elif encoding == "raw":
-        # Raw binary: Length-Based Parsing allows unescaped storage.
-        return f"{len(data)};raw,".encode("ascii") + data
+        payload = base64.b85encode(data)
     else:
-        # Default to base64
-        encoded = base64.b64encode(data)
-        return f"{len(encoded)};base64,".encode("ascii") + encoded
+        encoding = "base64"
+        payload = base64.b64encode(data)
+    escaped = escape_bytes(payload)
+    return f"{len(escaped)};{encoding},".encode("ascii") + escaped
 
 
 def decode_binary(text: bytes) -> bytes:
-    """Decodes binary data from bytes format."""
-    # text is bytes here, e.g. b"1024;base64,..."
+    """Decodes binary data from bytes format.
+
+    The payload arrives escaped: every reader that produces one reads it
+    length-based and hands the stored bytes over verbatim, so the unescaping
+    belongs here. Do not unescape before calling -- base85's alphabet contains
+    '@' (and raw can contain anything), so a second pass would collapse a
+    doubled '@' twice.
+    """
     # Read the tag from the header rather than searching the whole value: a raw
-    # or escaped payload can contain ";base64," itself.
+    # payload can contain ";base64," itself.
     match = _BINARY_HEADER.match(text)
-    if match:
-        tag = match.group(2).decode("ascii")
-        payload = text[match.end() :]
-        if tag == "base64":
-            return base64.b64decode(payload)
-        if tag == "base85":
-            return base64.b85decode(payload)
-        if tag == ESCAPED:
-            return unescape_bytes(payload)
-        if tag == "raw":
-            return payload
-    # Fall back to the substring search for values that reach here without a
-    # well-formed header.
-    if b";base64," in text:
-        _, encoded = text.split(b";base64,", 1)
-        return base64.b64decode(encoded)
-    elif b";base85," in text:
-        _, encoded = text.split(b";base85,", 1)
-        return base64.b85decode(encoded)
-    elif b";raw," in text:
-        _, raw_data = text.split(b";raw,", 1)
-        return raw_data
-    else:
+    if not match:
         raise ValueError("Invalid binary format")
+    tag = match.group(2).decode("ascii")
+    payload = unescape_bytes(text[match.end() :])
+    if tag == "base64":
+        return base64.b64decode(payload)
+    if tag == "base85":
+        return base64.b85decode(payload)
+    if tag == "raw":
+        return payload
+    raise ValueError(f"Unknown binary encoding {tag!r}")
 
 
 def escape(text: str) -> str:
