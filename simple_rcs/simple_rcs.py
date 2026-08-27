@@ -346,6 +346,13 @@ class SimpleRCS:
             if key == "version":
                 key = "ver"  # Normalize key
 
+            # `ver` is always a block's first field (see _format_block), so a
+            # second one starts the *next* block. Callers may hand us a range
+            # running to EOF, so stop rather than letting the following block's
+            # fields overwrite this one's.
+            if key == "ver" and "ver" in data:
+                break
+
             if key == "delta":
                 data["text"] = value
                 data["is_delta"] = True
@@ -421,6 +428,15 @@ class SimpleRCS:
 
             # Ensure the key is a valid keyword, otherwise break (malformed block)
             if key_bytes not in _keywords:
+                break
+
+            # `ver` is always a block's first field (see _format_block), so a
+            # second one starts the *next* block. Callers may hand us a range
+            # running to EOF, so stop rather than letting the following block's
+            # fields overwrite this one's. Kept identical in
+            # _parse_block_content (the reference parser) -- see
+            # test_parse_block_content_matches_no_regex.
+            if key_bytes in (b"ver", b"version") and "ver" in data:
                 break
 
             # Skip whitespace after key
@@ -632,6 +648,15 @@ class SimpleRCS:
             key_bytes = buf[key_start:pos]
 
             if key_bytes not in _all_kw:
+                break
+
+            # `ver` is always a block's first field (see _format_block), so a
+            # second one starts the *next* block. This parser is handed a
+            # range ending at block_end, which callers set to EOF (or to the
+            # following block's start) rather than to this block's own end --
+            # stop here so the next block's fields can't overwrite this one's,
+            # matching both content parsers.
+            if key_bytes in (b"ver", b"version") and "ver" in data:
                 break
 
             # skip whitespace before '@'
@@ -884,6 +909,15 @@ class SimpleRCS:
                     return self.stream.read(file_size - abs_start)
 
                 parsed = self._resolve_block(abs_start, file_size, metadata_only, _content_bytes)
+                if parsed and parsed.get("is_delta"):
+                    # HEAD is always stored as full text (commit() formats it
+                    # with is_delta=False), so a delta block here is a demoted
+                    # one -- meaning the real HEAD sitting after it wasn't
+                    # locatable. Accepting it would hand the caller an
+                    # unapplied delta script as though it were content, with
+                    # nothing later to apply it against. Treat it as a
+                    # rejected candidate and keep scanning left.
+                    parsed = {}
                 if parsed:
                     parsed["start"] = abs_start
                     parsed["end"] = file_size

@@ -132,3 +132,82 @@ def test_field_value_ending_in_marker_prefix_is_not_a_block_start():
     reloaded = SimpleRCS(raw)
     assert reloaded.checkout() == "real content here\n"
     assert reloaded.log()[0]["log"] == "Please check ver "
+
+
+def _damage_head_boundary(rcs: SimpleRCS) -> bytes:
+    """Drop one of the two newlines framing HEAD, breaking the boundary invariant.
+
+    Stands in for a stream SimpleRCS didn't write end to end: external damage,
+    a truncated write, or a file an older build appended to without the
+    separator commit() now writes.
+    """
+    rcs._load_head(force=True)  # commit() leaves head_info stale
+    raw = rcs.stream.getvalue()
+    head_start = rcs.head_info["start"]
+    assert raw[head_start - 2 : head_start] == b"\n\n"
+    return raw[: head_start - 1] + raw[head_start:]
+
+
+def test_unlocatable_head_does_not_merge_into_an_earlier_block():
+    """Falling back to an earlier block must not absorb the later one's fields.
+
+    The scan is handed a range ending at EOF, so a candidate resolved by
+    fallback used to parse straight through its own terminator and let the
+    following block's ver/hash overwrite it -- yielding a head_info whose
+    'ver' named one version while 'start' pointed at another. A commit() on
+    top of that then rewrote from the earlier offset, dropping the version in
+    between.
+    """
+    rcs = SimpleRCS()
+    rcs.commit("first\n", author="t", log="a")
+    rcs.commit("second\n", author="t", log="b")
+    damaged = _damage_head_boundary(rcs)
+
+    reloaded = SimpleRCS(damaged)
+    if reloaded.head_info is not None:
+        # Whatever it settles on, the identity and the offset must agree.
+        start = reloaded.head_info["start"]
+        assert damaged[start:].startswith(f"ver @{reloaded.head_info['ver']}@;".encode())
+
+    # log() reads through the metadata-only parser, checkout() through the
+    # content one; the two must not disagree about what HEAD is.
+    assert (reloaded.log()[0]["ver"] if reloaded.log() else None) == (
+        reloaded.head_info["ver"] if reloaded.head_info else None
+    )
+
+
+def test_delta_block_is_never_accepted_as_head():
+    """HEAD is always full text, so a delta block means the real HEAD is missing.
+
+    Accepting one would return the raw, unapplied delta script as content --
+    there is nothing after it to apply it against.
+    """
+    rcs = SimpleRCS()
+    rcs.commit("first\n", author="t", log="a")
+    rcs.commit("second\n", author="t", log="b")
+    damaged = _damage_head_boundary(rcs)
+
+    reloaded = SimpleRCS(damaged)
+    assert not (reloaded.head_info or {}).get("is_delta"), "a demoted block was accepted as HEAD"
+    # The 1.0 block holds "d1 1\na1 1\nfirst" -- a delta script, not content.
+    assert "d1 1" not in reloaded.checkout(), "checkout() returned an unapplied delta script"
+
+
+def test_parsers_stop_at_the_next_block_start():
+    """All three parsers stop at the following block rather than merging it in."""
+    rcs = SimpleRCS()
+    rcs.commit("first\n", author="t", log="a")
+    rcs.commit("second\n", author="t", log="b")
+    rcs._load_head(force=True)
+    raw = rcs.stream.getvalue()
+
+    # Deliberately hand each parser a range spanning *both* blocks.
+    two_blocks = raw[rcs._data_start :]
+    assert two_blocks.count(b"ver @") == 2, "precondition: the range covers two blocks"
+
+    for parse in (rcs._parse_block_content_no_regex, rcs._parse_block_content):
+        parsed = parse(two_blocks)
+        assert parsed["ver"] == "1.0", f"{parse.__name__} merged the next block"
+
+    meta = rcs._parse_block_meta_from_stream(rcs._data_start, len(raw))
+    assert meta["ver"] == "1.0", "_parse_block_meta_from_stream merged the next block"
