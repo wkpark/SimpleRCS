@@ -1,0 +1,8 @@
+# Cython sources ship; the .c files it generates do not. They are build
+# byproducts, present only in a working tree that has already built once, so
+# including them would make the sdist differ between a local build and a clean
+# CI checkout -- and a stale .c silently shadowing an edited .pyx is worse.
+global-exclude *.c
+global-exclude *.so
+
+recursive-include tests *.py
