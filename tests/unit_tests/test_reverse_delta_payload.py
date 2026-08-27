@@ -1,9 +1,11 @@
 """Reverse-delta payload round trips that used to come back wrong without an error."""
 
+import importlib
 import io
 
 import pytest
 
+from simple_rcs import matchers
 from simple_rcs.simple_rcs import SimpleRCS, SimpleRCSCorruptionError
 
 
@@ -75,3 +77,30 @@ def test_a_delta_short_by_more_than_one_line_is_corruption():
 
     with pytest.raises(SimpleRCSCorruptionError, match="payload"):
         damaged.checkout("1.0")
+
+
+def test_adjacent_inserts_at_one_anchor_apply_in_emission_order():
+    """A backend may emit two 'a' commands at the same line instead of one merged
+    insert (the Cython dmp matcher does for 'b' -> 'a b a c'). Each inserts at the
+    same index, so applying them in emission order reversed the payloads."""
+    rcs = SimpleRCS(io.BytesIO())
+
+    assert rcs._apply_reverse_delta("b\n", "a0 1\na\na1 1\na\na1 1\nc\n") == "a\nb\na\nc\n"
+
+
+@pytest.fixture(autouse=True)
+def _restore_backend():
+    yield
+    importlib.reload(matchers)
+
+
+@pytest.mark.parametrize("backend", matchers.available_backends())
+def test_repeated_lines_round_trip_on_every_backend(monkeypatch, backend):
+    """Content, not delta bytes: each backend may encode this differently."""
+    monkeypatch.setenv(matchers.ENV_VAR, backend)
+    importlib.reload(matchers)
+    old, new = "a\nb\na\nc\n", "b\n"
+
+    rcs = _two_versions(old, new)
+
+    assert rcs.checkout("1.0") == old

@@ -1245,13 +1245,18 @@ class SimpleRCS:
                     raise SimpleRCSCorruptionError(
                         f"Delta command 'a{start} {count}' has {len(payload)} payload line(s)"
                     )
-            commands.append({"cmd": cmd_char, "line": start, "count": count, "payload": payload})
+            commands.append(
+                {"cmd": cmd_char, "line": start, "count": count, "payload": payload, "order": len(commands)}
+            )
 
         # Sort commands by line number in descending order.
         # Tie-break: 'a' before 'd' at the same line (single-line replace emits
         # dN 1 + aN 1 at equal line numbers). Inserting first keeps the delete's
         # target index accurate; deleting first would shift the insert position.
-        commands.sort(key=lambda x: (-x["line"], 0 if x["cmd"] == "a" else 1))
+        # Several 'a' at one line (a backend may emit adjacent inserts unmerged)
+        # go in reverse emission order: each inserts at the same index, so the
+        # last emitted must go in first for the payloads to end up in sequence.
+        commands.sort(key=lambda x: (-x["line"], 0 if x["cmd"] == "a" else 1, -x["order"]))
 
         for cmd in commands:
             idx = cmd["line"]
