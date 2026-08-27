@@ -310,10 +310,26 @@ class SimpleRCS:
         if self.owns_handle and hasattr(self, "stream") and not self.stream.closed:
             self.stream.close()
 
+    def get_bytes(self) -> bytes:
+        """Returns the full RCS stream verbatim.
+
+        Use this rather than :meth:`get_content` whenever the stream may hold a
+        binary block written with the ``esc`` encoding: those payloads are raw
+        bytes, and decoding them as text is lossy.
+        """
+        pos = self.stream.tell()
+        self.stream.seek(0)
+        content = self.stream.read()
+        self.stream.seek(pos)
+        return content
+
     def get_content(self) -> str:
         """
         Returns the full content of the RCS stream as a string.
         Useful when working with in-memory streams to get the final result.
+
+        Text-safe encodings only. ``esc`` binary payloads are raw bytes and do
+        not survive the decode -- use :meth:`get_bytes` for those.
         """
         pos = self.stream.tell()
         self.stream.seek(0)
