@@ -243,3 +243,15 @@ def test_snapshot_chain_integrity(rcs):
 
     # Checkout should work
     assert rcs.checkout("1.1") == "V2\n"
+
+
+def test_commit_returns_version_for_in_memory_stream():
+    """commit() returns the version string regardless of the backing stream.
+
+    In-memory instances used to return the whole serialized stream instead,
+    which silently broke callers storing the return value as a version.
+    """
+    mem = SimpleRCS(None)
+    assert mem.commit("Line 1\n", author="a", log="v1") == "1.0"
+    assert mem.commit("Line 1\nLine 2\n", author="a", log="v2") == "1.1"
+    assert mem.checkout("1.0") == "Line 1\n"

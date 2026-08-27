@@ -1060,6 +1060,10 @@ class SimpleRCS:
                       instead of being converted to a delta. This creates an
                       intermediate snapshot for faster retrieval.
             encoding: Encoding to use for binary data ('base64' or 'base85').
+
+        Returns:
+            The new version string ("1.0", "1.1", ...), for every stream type.
+            Use get_content() / stream.getvalue() to read back the raw stream.
         """
         # BinaryIO → bytes: HEAD block requires full snapshot; one read is unavoidable.
         if hasattr(content, "read"):
@@ -1108,8 +1112,6 @@ class SimpleRCS:
                 )
             )
 
-            if isinstance(self.stream, io.BytesIO):
-                return self.get_content()
             return new_ver
 
         # --- Subsequent Commit Case ---
@@ -1236,8 +1238,6 @@ class SimpleRCS:
         self.stream.write(old_block_bytes + new_block_bytes)
         self.stream.truncate()  # Crucial: remove any leftover
 
-        if isinstance(self.stream, io.BytesIO):
-            return self.get_content()
         return new_ver
 
     def checkout(self, ver_num: str = None) -> str | bytes:
