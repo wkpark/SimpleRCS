@@ -68,10 +68,14 @@ def blob_id(data: bytes) -> str:
     full index line"). A sha256 repository would need the object format read
     from the target repository, not a default on this function.
     """
-    header = b"blob %d\0" % len(data)
     # usedforsecurity=False: this is git's object id, not a security hash --
     # it also lets the call work on a FIPS build, where sha1 is otherwise refused.
-    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+    # Fed in two update() calls rather than hashing `header + data`, which
+    # allocates a second copy of the whole file just to prepend 12 bytes.
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(b"blob %d\0" % len(data))
+    digest.update(data)
+    return digest.hexdigest()
 
 
 def _length_prefix(n: int) -> str:
