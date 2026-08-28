@@ -125,30 +125,55 @@ def test_a_failure_while_copying_the_history_leaves_the_original_untouched(tmp_p
     assert _temp_leftovers(tmp_path) == []
 
 
-def test_copy_prefix_includes_writes_still_held_in_the_stream_buffer(tmp_path):
-    """_copy_prefix reads the raw descriptor, which cannot see Python's buffer.
+def test_copy_prefix_copies_exactly_the_bytes_asked_for(tmp_path):
+    """It must stop at HEAD, not run to the end of the file.
 
-    commit() happens to flush before getting here (_load_head seeks to the end),
-    so this is on the unit rather than on a commit: drop the flush and the copy
-    comes up short of the bytes the caller can already see via tell().
+    Copying too much would leave the old HEAD sitting behind the new one, so the
+    scan would find a stale block after the commit. The revision here is larger
+    than one read so the loop actually iterates, and larger than the prefix so
+    "copy everything" and "copy nbytes" cannot coincide.
     """
-    path = tmp_path / "buffered.rcs"
+    path = tmp_path / "chunked.rcs"
     rcs = SimpleRCS(str(path))
-    rcs.commit("hello\n", author="tester", log="v0", date=FIXED_DATE)
+    rcs.commit("a" * (3 * 1024 * 1024) + "\n", author="tester", log="v0", date=FIXED_DATE)
+    rcs.commit("b" * (3 * 1024 * 1024) + "\n", author="tester", log="v1", date=FIXED_DATE)
 
-    rcs.stream.seek(0, os.SEEK_END)
-    rcs.stream.write(b"\n\nnot yet flushed\n")
-    size = rcs.stream.tell()
+    rcs._load_head(force=True)
+    prefix_length = rcs.head_info["start"]
+    assert 0 < prefix_length < os.path.getsize(path)
 
     fd, tmp_name = tempfile.mkstemp(dir=str(tmp_path))
     try:
-        rcs._copy_prefix(fd, size)
+        rcs._copy_prefix(fd, prefix_length)
         os.close(fd)
-        assert os.path.getsize(tmp_name) == size
-        assert b"not yet flushed" in open(tmp_name, "rb").read()
+        assert open(tmp_name, "rb").read() == path.read_bytes()[:prefix_length]
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+def test_committing_through_a_symlink_updates_the_store_it_points_at(tmp_path):
+    """os.replace swaps whatever the path names -- including a symlink itself.
+
+    Without resolving the path first, the commit succeeds, the link becomes a
+    regular file, and the store it pointed at silently never sees the revision.
+    """
+    store = tmp_path / "real" / "store.rcs"
+    store.parent.mkdir()
+    alias = tmp_path / "alias.rcs"
+
+    rcs = SimpleRCS(str(store))
+    rcs.commit(VERSIONS[0], author="tester", log="v0", date=FIXED_DATE)
+    rcs.stream.flush()
+    alias.symlink_to(store)
+
+    through_alias = SimpleRCS(str(alias))
+    through_alias.commit(VERSIONS[1], author="tester", log="v1", date=FIXED_DATE)
+    through_alias.stream.flush()
+
+    assert alias.is_symlink(), "the commit replaced the link instead of following it"
+    assert SimpleRCS(str(store)).checkout("1.1") == VERSIONS[1]
+    assert _temp_leftovers(store.parent) == []
 
 
 def test_the_instance_still_works_after_its_file_is_replaced(tmp_path):

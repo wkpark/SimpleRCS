@@ -29,6 +29,10 @@ _BOUNDARY_WINDOW = 2 + len(_BLOCK_MARKER) + 1
 # boundary is still found whole.
 _SCAN_OVERLAP = len(_BLOCK_MARKER) - 1
 
+# How much history _copy_prefix moves per read. Large enough that the loop
+# overhead is irrelevant, small enough not to hold a whole revision in memory.
+_COPY_CHUNK = 1 << 20
+
 
 class SimpleRCSCorruptionError(ValueError):
     """Raised when historical block data cannot be reconstructed because a
@@ -140,10 +144,13 @@ class SimpleRCS:
                 is_existing = os.path.exists(content_or_path)
                 mode = "rb+" if is_existing else "wb+"
                 self.stream = open(content_or_path, mode)
-                # Absolute: commits are installed by writing a temp file next to this
-                # one and renaming over it, so the path has to keep meaning the same
-                # file after a chdir.
-                self.file_path = os.path.abspath(content_or_path)
+                # realpath, not abspath: commits are installed by renaming a temp
+                # file over this path, so it must name the store itself. Left as a
+                # symlink, the rename would replace the *link* with a regular file
+                # and orphan what it pointed at -- an in-place write followed it.
+                # Resolving also keeps the temp file on the target's filesystem,
+                # which os.replace requires. Absolute, so a chdir cannot move it.
+                self.file_path = os.path.realpath(content_or_path)
                 self.owns_handle = True
 
                 # Check if file is empty
@@ -1326,26 +1333,30 @@ class SimpleRCS:
         which is also why we do not inherit RCS's exposure to memory corruption,
         where the whole history is re-encoded on every commit.
 
-        os.sendfile() reads from the raw descriptor, which does not see the
-        stream's own write buffer -- hence the flush. Through commit() the buffer
-        is empty anyway, since _load_head() seeks to the end first and a seek
-        flushes a BufferedRandom; the flush here is this method's own contract,
-        not a fix for an observed loss.
+        The copy goes through `self.stream` rather than a descriptor-level call.
+        os.sendfile() would be the obvious one, but its file-to-file form is
+        Linux-only: it does not exist on Windows, and the BSD/macOS variant needs
+        a socket for the destination. CPython draws the same line -- shutil only
+        uses it under `sys.platform.startswith("linux")`. os.copy_file_range() is
+        no better: it is missing from some builds (the interpreter uv ships has
+        neither it nor os.fallocate). On ext4 the descriptor-level calls measured
+        ~1.4 GB/s against ~1.2 GB/s for this loop, a difference that disappears
+        next to the fsync it sits beside.
 
-        os.copy_file_range() would be the more obvious call -- and would turn into
-        a reflink on btrfs/XFS -- but it is absent from some CPython builds (the
-        interpreter uv ships has neither it nor os.fallocate), and on ext4 it
-        measured no faster than sendfile. sendfile is present wherever we run.
-        EINTR needs no handling here: PEP 475 makes Python retry it.
+        Reading through the stream also means the copy sees the stream's own
+        buffered writes, so there is nothing to flush first.
+
+        Leaves the stream positioned at `nbytes`. Every caller either closes it
+        or goes through _load_head(), which seeks before it reads.
         """
-        self.stream.flush()
-        src_fd = self.stream.fileno()
-        offset = 0
-        while offset < nbytes:
-            sent = os.sendfile(dst_fd, src_fd, offset, nbytes - offset)
-            if sent == 0:
-                raise OSError(f"short copy of history: wanted {nbytes} bytes, stopped at {offset}")
-            offset += sent
+        self.stream.seek(0)
+        remaining = nbytes
+        while remaining > 0:
+            chunk = self.stream.read(min(_COPY_CHUNK, remaining))
+            if not chunk:
+                raise OSError(f"short copy of history: wanted {nbytes} bytes, stopped at {nbytes - remaining}")
+            self._write_all(dst_fd, chunk)
+            remaining -= len(chunk)
 
     @staticmethod
     def _write_all(fd: int, data: bytes) -> None:
