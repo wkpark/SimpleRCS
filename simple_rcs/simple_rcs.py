@@ -1432,9 +1432,13 @@ class SimpleRCS:
             if tmp_path is not None:
                 os.unlink(tmp_path)
 
-        # The cached head_info is keyed on file size (see _load_head); a rewrite
-        # that happens to land on the same size would otherwise keep the old HEAD.
-        self._load_head(force=True)
+        # Drop the cached HEAD rather than reloading it. The cache is keyed on file
+        # size (see _load_head), so a rewrite landing on the same size would keep
+        # serving the old block -- but re-parsing here would only pre-pay work the
+        # next caller does anyway: commit() and sign_head() both load before they
+        # read head_info. Reloading eagerly also left head_info fresh on this path
+        # and stale on the in-place one, splitting a documented contract in two.
+        self._head_cache_size = -1
 
         if self._durable:
             self._fsync_directory(directory)

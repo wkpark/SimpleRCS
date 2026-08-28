@@ -193,17 +193,20 @@ def test_the_instance_still_works_after_its_file_is_replaced(tmp_path):
     assert SimpleRCS(str(path)).checkout("1.3") == VERSIONS[3]
 
 
-def test_head_is_reloaded_even_when_the_rewrite_does_not_change_the_size(tmp_path):
-    """_load_head caches on file size, so a same-size rewrite must force a reload.
+def test_the_head_cache_cannot_serve_a_stale_block_after_a_same_size_rewrite(tmp_path):
+    """_load_head caches on file size, so a same-size rewrite has to drop the cache.
 
     Ordinary commits change the size, which is why this drives _atomic_rewrite_head
     directly with a payload that is the current HEAD block with one field swapped
-    for a different value of the same length.
+    for a different value of the same length. head_info itself stays stale after a
+    commit -- that is the documented contract -- so the property under test is that
+    the *next* load sees the new block rather than a cache hit on the old one.
     """
     path = tmp_path / "same_size.rcs"
     rcs = _build(path, VERSIONS[:2])
     size_before = os.path.getsize(path)
 
+    rcs._load_head()
     head = rcs.head_info
     assert head["log"] == "v1"
     replacement = dict(head)
@@ -220,6 +223,7 @@ def test_head_is_reloaded_even_when_the_rewrite_does_not_change_the_size(tmp_pat
     rcs._atomic_rewrite_head(payload, str(path), head["start"])
 
     assert os.path.getsize(path) == size_before
+    rcs._load_head()
     assert rcs.head_info["log"] == "vX"
 
 
