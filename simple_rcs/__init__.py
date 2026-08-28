@@ -6,5 +6,5 @@ wiki: https://github.com/wkpark/SimpleRCS/wiki
 
 from .simple_rcs import SimpleRCS, SimpleRCSCorruptionError
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 __all__ = ["SimpleRCS", "SimpleRCSCorruptionError"]
