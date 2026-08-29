@@ -130,6 +130,13 @@ The patterns come from a driver chosen by file extension. `--funcname-driver`
 overrides the choice (`default` is the language-agnostic rule: a line starting
 an identifier in column 0), and `-F REGEX` replaces it outright.
 
+Output is coloured when stdout is a terminal, using git's own scheme and its
+own escape placement — red removals, green additions, cyan hunk headers, and a
+red background on whitespace that should not be committed. `--color=always`
+forces it through a pipe, `--no-color` turns it off, and `NO_COLOR` or
+`TERM=dumb` is respected. `--binary` output is never coloured: it exists to be
+piped into `git apply`.
+
 ## Testing
 
 ```
@@ -251,6 +258,12 @@ $ srcs_diff.py m.py -r 1.0:1.1 -U0 -p
 패턴은 확장자로 고른 드라이버에서 온다. `--funcname-driver`로 직접 지정할 수
 있고(`default`는 언어 무관 규칙 — 0열에서 식별자로 시작하는 줄), `-F REGEX`는
 드라이버 대신 그 정규식을 쓴다.
+
+stdout이 터미널이면 git과 같은 배색과 같은 escape 배치로 색을 입힌다 — 삭제는
+빨강, 추가는 초록, hunk 헤더는 cyan, 커밋하면 안 되는 공백은 빨간 배경.
+파이프로 넘길 때도 색을 원하면 `--color=always`, 끄려면 `--no-color`이고,
+`NO_COLOR`나 `TERM=dumb`도 따른다. `--binary` 출력은 `git apply`로 넘기라고
+있는 것이므로 절대 색을 입히지 않는다.
 
 ## 테스트
 

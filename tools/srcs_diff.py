@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from simple_rcs import funcname, gitpatch
+from simple_rcs import color, funcname, gitpatch
 from simple_rcs.myersdiff import MyersSequenceMatcher
 from simple_rcs.pydifflib import StreamSequenceMatcher
 from simple_rcs.simple_rcs import SimpleRCS
@@ -39,12 +39,16 @@ def _context_width(value: str) -> int:
     return width
 
 
-def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
-                               fromfile: str, tofile: str, context: int = 3,
-                               annotator: "funcname.HunkAnnotator | None" = None):
+def iter_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
+                              fromfile: str, tofile: str, context: int = 3,
+                              annotator: "funcname.HunkAnnotator | None" = None):
     """
-    Generates and prints a unified diff using a given matcher with proper context.
+    Yields a unified diff using a given matcher with proper context.
     Works with any matcher providing get_opcodes().
+
+    Lines are yielded rather than printed so that the same colouriser can wrap
+    this and difflib's own generator; the terminators match difflib's, which
+    means the last line of a file that ends without one is yielded without one.
 
     An annotator, if given, names the enclosing declaration on each hunk header.
     It is fed the hunk's start index directly rather than the printed line
@@ -53,8 +57,8 @@ def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
     fromdate = time.ctime(os.stat(fromfile).st_mtime) if os.path.exists(fromfile) else time.ctime()
     todate = time.ctime()
 
-    print(f"--- {fromfile}\t{fromdate}")
-    print(f"+++ {tofile}\t{todate}")
+    yield f"--- {fromfile}\t{fromdate}\n"
+    yield f"+++ {tofile}\t{todate}\n"
 
     opcodes = list(matcher.get_opcodes())
 
@@ -107,26 +111,23 @@ def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
         range_b = f"{j1+1},{j2-j1}" if j2-j1 != 1 else f"{j1+1}"
 
         label = annotator.label(i1) if annotator else ""
-        print(f"@@ -{range_a} +{range_b} @@ {label}".rstrip())
+        yield f"@@ -{range_a} +{range_b} @@ {label}".rstrip() + "\n"
 
         for tag, i1, i2, j1, j2 in group:
             if tag == 'equal':
                 for line in lines_a[i1:i2]:
-                    print(" " + line, end='')
+                    yield " " + line
             elif tag == 'delete':
                 for line in lines_a[i1:i2]:
-                    print("-" + line, end='')
+                    yield "-" + line
             elif tag == 'insert':
                 for line in lines_b[j1:j2]:
-                    print("+" + line, end='')
+                    yield "+" + line
             elif tag == 'replace':
                 for line in lines_a[i1:i2]:
-                    print("-" + line, end='')
+                    yield "-" + line
                 for line in lines_b[j1:j2]:
-                    print("+" + line, end='')
-
-            # Handle missing newlines at end of file if necessary (difflib usually adds \n\ No newline...)
-            pass # print() usually adds \n, but we used end='' for lines with \n.
+                    yield "+" + line
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show diffs between revisions or working file.")
@@ -155,6 +156,14 @@ def main() -> None:
     parser.add_argument("-F", "--funcname-regex",
         help="Match hunk headers against this regex instead of a driver. If it has a "
              "capturing group, only the group is shown. Implies -p.")
+    parser.add_argument("--color", nargs="?", const="always", default="auto",
+        choices=["auto", "always", "never"],
+        help="Colour the diff the way 'git diff' does (default: auto, i.e. only "
+             "when stdout is a terminal). NO_COLOR and TERM=dumb turn it off. "
+             "--binary is never coloured: that output exists to be piped into "
+             "'git apply'.")
+    parser.add_argument("--no-color", dest="color", action="store_const", const="never",
+        help="Same as --color=never.")
     parser.add_argument("--engine", default="difflib",
         choices=["difflib", "pydifflib", "myers", "ses", "dmp"],
         help="Diff engine to use (ses/dmp are the Cython Myers variants)")
@@ -278,27 +287,34 @@ def main() -> None:
             sys.exit(2)
         annotator = funcname.HunkAnnotator(lines_a, matcher)
 
+    palette = color.DEFAULT_PALETTE if color.want_color(args.color, sys.stdout) else None
+
+    def write(diff_lines) -> None:
+        if palette is not None:
+            diff_lines = color.colorize_unified_diff(diff_lines, palette)
+        sys.stdout.writelines(diff_lines)
+
     if args.engine == "difflib":
         diff_lines = difflib.unified_diff(
             lines_a, lines_b, fromfile=label_a, tofile=label_b, n=args.unified,
         )
         if annotator is not None:
             diff_lines = funcname.annotate_unified_diff(diff_lines, annotator)
-        sys.stdout.writelines(diff_lines)
+        write(diff_lines)
 
     elif args.engine == "pydifflib":
         # pydifflib uses streams
         stream_a = io.BytesIO(content_a.encode('utf-8'))
         stream_b = io.BytesIO(content_b.encode('utf-8'))
         matcher = StreamSequenceMatcher(stream_a, stream_b, chunk_size=None)
-        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
-                                   context=args.unified, annotator=annotator)
+        write(iter_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
+                                        context=args.unified, annotator=annotator))
 
     elif args.engine == "myers":
         # Myers works on lists of lines
         matcher = MyersSequenceMatcher(None, lines_a, lines_b)
-        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
-                                   context=args.unified, annotator=annotator)
+        write(iter_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
+                                        context=args.unified, annotator=annotator))
 
     elif args.engine in ("ses", "dmp"):
         module_name = f"simple_rcs._myersdiff_{args.engine}"
@@ -308,8 +324,8 @@ def main() -> None:
             print(f"Error: Cython module '{module_name}' not available (build the extension first).", file=sys.stderr)
             sys.exit(1)
         matcher = module.MyersSequenceMatcher(None, lines_a, lines_b)
-        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
-                                   context=args.unified, annotator=annotator)
+        write(iter_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
+                                        context=args.unified, annotator=annotator))
     end_time = time.perf_counter()
     print(f"\nTime taken: {end_time - start_time:.4f}s", file=sys.stderr)
 

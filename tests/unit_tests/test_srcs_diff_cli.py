@@ -9,6 +9,7 @@ imports from tools/.
 """
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -280,3 +281,82 @@ def test_asking_for_the_default_driver_by_name_still_labels(tmp_path):
         "@@ -5 +5 @@ def render(self):",
         "@@ -10 +10 @@ def resize(self):",
     ], result.stderr
+
+
+# --------------------------------------------------------------------------
+# colour
+#
+# test_color pins the escapes themselves against real git. What is only
+# reachable here is the switch: that piping never colours, that every engine
+# goes through the colouriser, and that --binary stays machine-readable.
+# --------------------------------------------------------------------------
+
+ESC = "\033["
+
+
+def test_a_piped_diff_is_not_coloured(tmp_path):
+    """subprocess gives the CLI a pipe, which is what --color=auto is for."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1")
+
+    assert ESC not in result.stdout
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_color_always_colours_every_engine(tmp_path, engine):
+    """The colouriser wraps one shared writer, so an engine that bypassed it
+    would be the only plain one -- easy to add and easy to miss."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "--color=always", "--engine", engine)
+
+    assert result.returncode in (0, 1), result.stderr
+    assert "\033[36m@@" in result.stdout
+    assert "\033[31m-" in result.stdout
+    assert "\033[32m+" in result.stdout
+
+
+def test_color_with_no_value_means_always(tmp_path):
+    """git spells it that way, and a bare --color that did nothing over a pipe
+    would look broken."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    assert ESC in _run(tmp_path, "m.py", "-r", "1.0:1.1", "--color").stdout
+
+
+@pytest.mark.parametrize("flag", ["--no-color", "--color=never"])
+def test_colour_can_be_turned_off_explicitly(tmp_path, flag):
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    assert ESC not in _run(tmp_path, "m.py", "-r", "1.0:1.1", flag).stdout
+
+
+def test_an_unknown_colour_mode_is_rejected(tmp_path):
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "--color=sometimes")
+
+    assert result.returncode == 2
+    assert ESC not in result.stdout
+
+
+def test_a_binary_patch_is_never_coloured(tmp_path):
+    """It exists to be redirected into `git apply`; escapes would corrupt it."""
+    _history(tmp_path, [V1, V2])
+
+    result = _run(tmp_path, "data.bin", "--binary", "-r", "1.0:1.1", "--color=always")
+
+    assert result.returncode == 0, result.stderr
+    assert ESC not in result.stdout
+
+
+def test_turning_colour_on_does_not_change_the_diff_itself(tmp_path):
+    """Stripping the escapes back out must give the uncoloured output, or the
+    colouriser is rewriting content rather than wrapping it."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    plain = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-p").stdout
+    painted = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-p", "--color=always").stdout
+
+    assert re.sub(r"\033\[[0-9;]*m", "", painted) == plain

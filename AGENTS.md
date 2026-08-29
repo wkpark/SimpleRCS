@@ -31,6 +31,9 @@ build (used to produce a pure-Python wheel).
 |---|---|
 | `simple_rcs/simple_rcs.py` | Core `SimpleRCS` class: commit/checkout/log/blame/diff/verify/sign_head, block parsing, backward file scanning |
 | `simple_rcs/codec.py` | Stateless format primitives: binary payload encode/decode, `@`-escaping, block hash |
+| `simple_rcs/gitpatch.py` | `GIT binary patch` emitter — the container `git apply` accepts for binary revisions |
+| `simple_rcs/funcname.py` | Hunk-header labelling: the per-language declaration drivers and the upward search |
+| `simple_rcs/color.py` | Diff colouring — git's palette *and* its escape placement, pinned against real `git diff` |
 | `simple_rcs/pydifflib.py` | `StreamSequenceMatcher` — the production text-diff engine (hash-based greedy + difflib refinement) |
 | `simple_rcs/pybsdiff.py` | BSDIFF-style binary deltas |
 | `simple_rcs/myersdiff*.py` | Pure-Python Myers variants — first-cut reference implementations, **never a fallback target** (see Gotchas) |
