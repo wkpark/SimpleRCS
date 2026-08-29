@@ -116,6 +116,20 @@ listing), `srcs_diff.py` (unified diff between versions or engines),
 `srcs_sign_head.py` (GPG-sign the current HEAD), and `bench_diff.py`
 (diff-engine benchmark harness).
 
+`srcs_diff.py -p` names the enclosing declaration on each hunk header, the way
+`git diff` does. The name is searched upwards from the hunk in the *older*
+revision, so a renamed function shows its old name:
+
+```
+$ srcs_diff.py m.py -r 1.0:1.1 -U0 -p
+@@ -5 +5 @@ def render(self):
+@@ -10 +10 @@ def resize(self):
+```
+
+The patterns come from a driver chosen by file extension. `--funcname-driver`
+overrides the choice (`default` is the language-agnostic rule: a line starting
+an identifier in column 0), and `-F REGEX` replaces it outright.
+
 ## Testing
 
 ```
@@ -223,6 +237,20 @@ rcs.commit(open("image.png", "rb").read(), author="alice")
 명령줄 도구는 `tools/`에 있다: `srcs_log.py`(히스토리/서명 목록),
 `srcs_diff.py`(버전/엔진 간 unified diff), `srcs_sign_head.py`(현재
 HEAD를 GPG로 서명), `bench_diff.py`(diff 엔진 벤치마크).
+
+`srcs_diff.py -p`는 `git diff`처럼 hunk 헤더에 그 변경을 감싸는 선언 이름을
+붙인다. 이름은 **구 버전**에서 hunk 위쪽으로 거슬러 찾으므로, 함수 이름을
+바꾼 경우 옛 이름이 표시된다:
+
+```
+$ srcs_diff.py m.py -r 1.0:1.1 -U0 -p
+@@ -5 +5 @@ def render(self):
+@@ -10 +10 @@ def resize(self):
+```
+
+패턴은 확장자로 고른 드라이버에서 온다. `--funcname-driver`로 직접 지정할 수
+있고(`default`는 언어 무관 규칙 — 0열에서 식별자로 시작하는 줄), `-F REGEX`는
+드라이버 대신 그 정규식을 쓴다.
 
 ## 테스트
 

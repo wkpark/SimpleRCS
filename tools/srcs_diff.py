@@ -5,11 +5,12 @@ import difflib
 import importlib
 import io
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
-from simple_rcs import gitpatch
+from simple_rcs import funcname, gitpatch
 from simple_rcs.myersdiff import MyersSequenceMatcher
 from simple_rcs.pydifflib import StreamSequenceMatcher
 from simple_rcs.simple_rcs import SimpleRCS
@@ -29,11 +30,25 @@ def resolve_rcs_path(target_path: Path, explicit_rcs_path: str = None, srcs_dir_
     srcs_dir = Path(srcs_dir_name)
     return srcs_dir / rcs_filename
 
+def _context_width(value: str) -> int:
+    """A width for -U. Negative widths make the ranges in @@ negative, which no
+    patch tool accepts -- and the script would still exit 0."""
+    width = int(value)
+    if width < 0:
+        raise argparse.ArgumentTypeError(f"context must not be negative: {value}")
+    return width
+
+
 def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
-                               fromfile: str, tofile: str, context: int = 3):
+                               fromfile: str, tofile: str, context: int = 3,
+                               annotator: "funcname.HunkAnnotator | None" = None):
     """
     Generates and prints a unified diff using a given matcher with proper context.
     Works with any matcher providing get_opcodes().
+
+    An annotator, if given, names the enclosing declaration on each hunk header.
+    It is fed the hunk's start index directly rather than the printed line
+    number, so the zero-length-range convention never enters into it.
     """
     fromdate = time.ctime(os.stat(fromfile).st_mtime) if os.path.exists(fromfile) else time.ctime()
     todate = time.ctime()
@@ -91,7 +106,8 @@ def print_matcher_unified_diff(matcher, lines_a: list[str], lines_b: list[str],
         range_a = f"{i1+1},{i2-i1}" if i2-i1 != 1 else f"{i1+1}"
         range_b = f"{j1+1},{j2-j1}" if j2-j1 != 1 else f"{j1+1}"
 
-        print(f"@@ -{range_a} +{range_b} @@")
+        label = annotator.label(i1) if annotator else ""
+        print(f"@@ -{range_a} +{range_b} @@ {label}".rstrip())
 
         for tag, i1, i2, j1, j2 in group:
             if tag == 'equal':
@@ -124,11 +140,31 @@ def main() -> None:
              "Text revisions still get the usual unified diff, as with 'git diff --binary'. "
              "Exits 0 once the patch is written, so redirecting it to a file does not read as failure; "
              "without this flag the exit status keeps diff(1) semantics (1 = the revisions differ).")
+    parser.add_argument("-U", "--unified", type=_context_width, default=3, metavar="N",
+        help="Lines of context around each change (default: 3). Smaller values split "
+             "nearby changes into separate hunks, which is where -p earns its keep.")
+    parser.add_argument("-p", "--show-function-line", action="store_true",
+        help="Name the enclosing function on each hunk header, as 'git diff' does. "
+             "The name is searched upwards from the hunk in the older revision, so a "
+             "renamed function shows its old name.")
+    parser.add_argument("--funcname-driver", default=None,
+        choices=["auto", "default", *sorted(funcname.DRIVERS)],
+        help="Which declaration patterns -p uses. 'auto' picks by file extension; "
+             "'default' is the language-agnostic rule (a line starting an identifier "
+             "in column 0). Implies -p (default: auto)")
+    parser.add_argument("-F", "--funcname-regex",
+        help="Match hunk headers against this regex instead of a driver. If it has a "
+             "capturing group, only the group is shown. Implies -p.")
     parser.add_argument("--engine", default="difflib",
         choices=["difflib", "pydifflib", "myers", "ses", "dmp"],
         help="Diff engine to use (ses/dmp are the Cython Myers variants)")
 
     args = parser.parse_args()
+
+    # Naming a driver or a pattern is only ever meant as "label the hunks that
+    # way", so it would be a trap to have it silently do nothing without -p.
+    show_funcnames = (args.show_function_line or args.funcname_regex is not None
+                      or args.funcname_driver is not None)
 
     target_path = Path(args.content_file)
     rcs_path = resolve_rcs_path(target_path, args.rcs_file, args.srcs_dir)
@@ -228,13 +264,26 @@ def main() -> None:
     print(f"Diffing using engine: {args.engine}", file=sys.stderr)
     start_time = time.perf_counter()
 
+    lines_a = content_a.splitlines(keepends=True)
+    lines_b = content_b.splitlines(keepends=True)
+
+    annotator = None
+    if show_funcnames:
+        try:
+            matcher = funcname.matcher_for(
+                args.funcname_driver, target_path.name, args.funcname_regex
+            )
+        except (ValueError, re.error) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+        annotator = funcname.HunkAnnotator(lines_a, matcher)
+
     if args.engine == "difflib":
         diff_lines = difflib.unified_diff(
-            content_a.splitlines(keepends=True),
-            content_b.splitlines(keepends=True),
-            fromfile=label_a,
-            tofile=label_b,
+            lines_a, lines_b, fromfile=label_a, tofile=label_b, n=args.unified,
         )
+        if annotator is not None:
+            diff_lines = funcname.annotate_unified_diff(diff_lines, annotator)
         sys.stdout.writelines(diff_lines)
 
     elif args.engine == "pydifflib":
@@ -242,16 +291,14 @@ def main() -> None:
         stream_a = io.BytesIO(content_a.encode('utf-8'))
         stream_b = io.BytesIO(content_b.encode('utf-8'))
         matcher = StreamSequenceMatcher(stream_a, stream_b, chunk_size=None)
-        lines_a = content_a.splitlines(keepends=True)
-        lines_b = content_b.splitlines(keepends=True)
-        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
+        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
+                                   context=args.unified, annotator=annotator)
 
     elif args.engine == "myers":
         # Myers works on lists of lines
-        lines_a = content_a.splitlines(keepends=True)
-        lines_b = content_b.splitlines(keepends=True)
         matcher = MyersSequenceMatcher(None, lines_a, lines_b)
-        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
+        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
+                                   context=args.unified, annotator=annotator)
 
     elif args.engine in ("ses", "dmp"):
         module_name = f"simple_rcs._myersdiff_{args.engine}"
@@ -260,10 +307,9 @@ def main() -> None:
         except ImportError:
             print(f"Error: Cython module '{module_name}' not available (build the extension first).", file=sys.stderr)
             sys.exit(1)
-        lines_a = content_a.splitlines(keepends=True)
-        lines_b = content_b.splitlines(keepends=True)
         matcher = module.MyersSequenceMatcher(None, lines_a, lines_b)
-        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b)
+        print_matcher_unified_diff(matcher, lines_a, lines_b, label_a, label_b,
+                                   context=args.unified, annotator=annotator)
     end_time = time.perf_counter()
     print(f"\nTime taken: {end_time - start_time:.4f}s", file=sys.stderr)
 

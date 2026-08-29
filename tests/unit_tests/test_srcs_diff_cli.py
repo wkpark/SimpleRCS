@@ -1,12 +1,14 @@
-"""srcs_diff --binary, end to end.
+"""srcs_diff, end to end.
 
-test_gitpatch covers the patch format itself. What is only reachable through
-the CLI is the wiring: which branch --binary takes, the bytes conversion when
-one side is text and the other is not, the path written into the patch, and the
-exit status. Those are exercised here by running the script, since nothing
+test_gitpatch and test_funcname cover the formats and the rules themselves.
+What is only reachable through the CLI is the wiring: which branch --binary
+takes, the bytes conversion when one side is text and the other is not, the
+path written into the patch, the exit status, and which flags switch hunk
+labelling on. Those are exercised here by running the script, since nothing
 imports from tools/.
 """
 
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -131,3 +133,150 @@ def test_git_applies_the_patch_the_cli_produced(tmp_path):
 
     git("apply", "-R", "out.patch")
     assert target.read_bytes() == V1
+
+
+SOURCE_V1 = """\
+class Widget:
+    def render(self):
+        a = 1
+        b = 2
+        c = 3
+        d = 4
+        return a
+
+    def resize(self):
+        w = 1
+        return w
+"""
+SOURCE_V2 = SOURCE_V1.replace("c = 3", "c = 99").replace("w = 1", "w = 2")
+
+#: The Cython matchers only exist once the extensions are built, so they join
+#: the sweep when present rather than being permanently excluded from it.
+ENGINES = ["difflib", "pydifflib", "myers"] + [
+    name for name in ("ses", "dmp")
+    if importlib.util.find_spec(f"simple_rcs._myersdiff_{name}") is not None
+]
+
+
+def _headers(stdout: str) -> list[str]:
+    return [line for line in stdout.splitlines() if line.startswith("@@")]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_hunk_headers_are_unlabelled_by_default(tmp_path, engine):
+    """The flag is opt-in: adding the feature must not rewrite the output of
+    every existing caller."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-U0", "--engine", engine)
+
+    assert _headers(result.stdout) == ["@@ -5 +5 @@", "@@ -10 +10 @@"], result.stderr
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_p_labels_every_hunk_on_every_engine(tmp_path, engine):
+    """The label comes from the emit layer, not the diff algorithm, so the
+    engine must not change it."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-U0", "-p", "--engine", engine)
+
+    assert _headers(result.stdout) == [
+        "@@ -5 +5 @@ def render(self):",
+        "@@ -10 +10 @@ def resize(self):",
+    ], result.stderr
+
+
+def test_naming_a_driver_is_enough_to_turn_labelling_on(tmp_path):
+    """Passing --funcname-driver and getting no labels would be a trap."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-U0", "--funcname-driver", "default")
+
+    # The positional rule cannot see an indented def, so both hunks fall back
+    # to the class -- which is exactly how it differs from the python driver.
+    assert _headers(result.stdout) == [
+        "@@ -5 +5 @@ class Widget:",
+        "@@ -10 +10 @@ class Widget:",
+    ], result.stderr
+
+
+def test_a_custom_regex_replaces_the_driver(tmp_path):
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-U0", "-F", r"^(class .*)$")
+
+    assert _headers(result.stdout) == [
+        "@@ -5 +5 @@ class Widget:",
+        "@@ -10 +10 @@ class Widget:",
+    ], result.stderr
+
+
+def test_a_broken_regex_is_reported_rather_than_traced(tmp_path):
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-F", "(unclosed")
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "Error:" in result.stderr
+
+
+def test_context_width_is_settable(tmp_path):
+    """-U is what makes labelling worth having: at the default width the two
+    changes here merge into one hunk and only the first label is ever shown."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    wide = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-U2", "-p")
+
+    assert _headers(wide.stdout) == ["@@ -3,9 +3,9 @@ def render(self):"], wide.stderr
+
+
+@pytest.mark.skipif(GIT is None, reason="git is not installed")
+def test_the_labels_match_what_git_prints_for_the_same_content(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run([GIT, *args], cwd=repo, capture_output=True, text=True, check=True)
+
+    git("init", "-q", ".")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (repo / ".gitattributes").write_text("*.py diff=python\n")
+
+    target = _history(repo, [SOURCE_V1, SOURCE_V2], name="m.py")
+    target.write_text(SOURCE_V1)
+    git("add", "m.py", ".gitattributes")
+    git("commit", "-q", "-m", "base")
+    target.write_text(SOURCE_V2)
+
+    theirs = _headers(git("diff", "-U0", "--", "m.py").stdout)
+    ours = _headers(_run(repo, "m.py", "-r", "1.0:1.1", "-U0", "-p").stdout)
+
+    assert ours == theirs
+
+
+def test_a_negative_context_width_is_rejected(tmp_path):
+    """It produced `@@ -6,-1 +6,-1 @@` -- which no patch tool accepts -- and
+    still exited 0, so a redirected diff looked like it had succeeded."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "--unified=-1")
+
+    assert result.returncode == 2
+    assert "must not be negative" in result.stderr
+    assert "@@" not in result.stdout
+
+
+def test_asking_for_the_default_driver_by_name_still_labels(tmp_path):
+    """--funcname-driver says it implies -p; naming its own default must not be
+    the one spelling that silently does nothing."""
+    _history(tmp_path, [SOURCE_V1, SOURCE_V2], name="m.py")
+
+    result = _run(tmp_path, "m.py", "-r", "1.0:1.1", "-U0", "--funcname-driver", "auto")
+
+    assert _headers(result.stdout) == [
+        "@@ -5 +5 @@ def render(self):",
+        "@@ -10 +10 @@ def resize(self):",
+    ], result.stderr
