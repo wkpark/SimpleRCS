@@ -34,6 +34,21 @@ _SCAN_OVERLAP = len(_BLOCK_MARKER) - 1
 _COPY_CHUNK = 1 << 20
 
 
+def _with_trailing_newline(content: str | bytes) -> str | bytes:
+    """The EOL policy a commit is stored under: text gains a trailing newline so
+    that hashing and line deltas see one canonical form. Empty text is left
+    alone, and bytes are never touched.
+
+    It lives here rather than inline in commit() because matches_head() has to
+    predict exactly what commit() will store. A second copy of the rule would
+    drift, and the symptom would be quiet: every file that does not end in a
+    newline would report a change on every commit, forever.
+    """
+    if isinstance(content, str) and content and not content.endswith("\n"):
+        return content + "\n"
+    return content
+
+
 class SimpleRCSCorruptionError(ValueError):
     """Raised when historical block data cannot be reconstructed because a
     delta payload is corrupted (bad base64/base85, truncated BSDIFF patch,
@@ -1493,6 +1508,41 @@ class SimpleRCS:
 
         return b"\n".join(lines) + b"\n\n"
 
+    def matches_head(self, content: str | bytes) -> bool:
+        """Whether committing ``content`` would store a version identical to HEAD.
+
+        A no-change commit is not an error: it is written as an empty delta and
+        every checkout still round-trips. It is rarely what the caller meant,
+        though, and it is not free -- each one adds a link that a checkout of
+        any older version has to walk back through, rewrites the HEAD region of
+        the file, and takes a GPG signature if signing is on. Callers that want
+        to refuse one ask here first; ``commit`` itself stays permissive,
+        because re-signing or correcting an author or log message is a real
+        reason to store the same bytes again.
+
+        The comparison applies the same trailing-newline rule ``commit`` does,
+        which is the whole reason this is not a one-liner at the call site: a
+        file that does not end in a newline is stored as if it did, so a plain
+        ``content == checkout()`` would call every such file changed every time.
+
+        False when there is no HEAD -- a first commit is never a repeat. Text
+        and bytes never match each other either: committing one over the other
+        is a type change, stored as a snapshot rather than a delta even when
+        the bytes agree. That needs no check of its own, since a HEAD stored as
+        binary reads back as ``bytes`` and Python will not call those equal to
+        a ``str``; an explicit guard here could never fire, and one that can
+        never fire is a false reassurance.
+        """
+        if not isinstance(content, (str, bytes)):
+            # commit() also takes a stream; comparing one would silently answer
+            # "changed", which is the wrong way for this to fail.
+            raise TypeError("matches_head takes str or bytes; read a stream first")
+
+        self._load_head()
+        if not self.head_info:
+            return False
+        return _with_trailing_newline(content) == self.head_info.get("text")
+
     def commit(  # noqa: C901
         self,
         content: str | bytes | BinaryIO,
@@ -1533,8 +1583,7 @@ class SimpleRCS:
         now = date if date else datetime.now().isoformat()
 
         # Enforce EOL policy for consistent hashing (only for text)
-        if isinstance(content, str) and content and not content.endswith("\n"):
-            content += "\n"
+        content = _with_trailing_newline(content)
 
         # --- First Commit Case ---
         if not self.head_info:

@@ -107,6 +107,10 @@ rcs.diff(v1, v2)           # unified diff between two versions
 rcs.blame()                 # per-line author/version attribution for HEAD
 rcs.verify()               # walks the v2 hash chain, returns True/False
 
+# Would committing this store a version identical to HEAD? Applies the same
+# trailing-newline rule commit() does, so a file that lacks one still matches.
+rcs.matches_head("Hello\nSimpleRCS")   # -> True
+
 # Binary content works the same way
 rcs.commit(open("image.png", "rb").read(), author="alice")
 ```
@@ -136,6 +140,13 @@ red background on whitespace that should not be committed. `--color=always`
 forces it through a pipe, `--no-color` turns it off, and `NO_COLOR` or
 `TERM=dumb` is respected. `--binary` output is never coloured: it exists to be
 piped into `git apply`.
+
+`srcs_commit.py` refuses a file that is identical to HEAD, as `git commit`
+does — "nothing to commit", exit 1 — because a repeat commit stores an empty
+delta that every later checkout of an older version then walks back through.
+`--allow-empty` commits it anyway, for the cases git keeps the flag for.
+`SimpleRCS.commit()` itself stays permissive: re-signing, or correcting an
+author or a log message, is a real reason to store the same bytes again.
 
 ## Testing
 
@@ -237,6 +248,10 @@ rcs.diff(v1, v2)           # 두 버전 간 unified diff
 rcs.blame()                 # HEAD의 라인별 저자/버전 귀속
 rcs.verify()               # v2 해시 체인 검증, True/False 반환
 
+# 지금 커밋하면 HEAD와 같은 버전이 되는가? commit()과 같은 개행 규칙을 적용하므로
+# 끝에 개행이 없는 파일도 정확히 판정된다.
+rcs.matches_head("Hello\nSimpleRCS")   # -> True
+
 # 바이너리 콘텐츠도 동일하게 동작
 rcs.commit(open("image.png", "rb").read(), author="alice")
 ```
@@ -264,6 +279,12 @@ stdout이 터미널이면 git과 같은 배색과 같은 escape 배치로 색을
 파이프로 넘길 때도 색을 원하면 `--color=always`, 끄려면 `--no-color`이고,
 `NO_COLOR`나 `TERM=dumb`도 따른다. `--binary` 출력은 `git apply`로 넘기라고
 있는 것이므로 절대 색을 입히지 않는다.
+
+`srcs_commit.py`는 HEAD와 내용이 같은 파일의 커밋을 `git commit`처럼 거부한다
+— "nothing to commit", exit 1. 같은 내용을 다시 커밋하면 빈 델타가 하나 쌓이고,
+이후 옛 버전을 checkout할 때마다 그 링크를 되짚어야 하기 때문이다. 그래도
+남기고 싶으면 `--allow-empty`. 라이브러리 `commit()` 자체는 막지 않는다 —
+재서명이나 author/log 정정처럼 같은 바이트를 다시 저장할 이유가 실제로 있다.
 
 ## 테스트
 

@@ -34,6 +34,12 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument("--allow-empty", action="store_true",
+        help="Commit even when the content is identical to HEAD. Without it an "
+             "unchanged file is refused with exit 1, as 'git commit' does -- a "
+             "repeat commit stores an empty delta, which every later checkout "
+             "of an older version then has to walk back through.")
+
     # New: Configure storage directory
     parser.add_argument("--srcs-dir", default=".srcs",
         help="Directory to store .srcs files if rcs_file is not provided (default: .srcs)")
@@ -87,6 +93,13 @@ def main() -> None:
     # Initialize SimpleRCS
     # SimpleRCS expects str path
     rcs = SimpleRCS(str(rcs_path))
+
+    # Before the signing setup: there is no point taking a GPG signature for a
+    # commit that is about to be refused.
+    if not args.allow_empty and rcs.matches_head(content):
+        head_ver = rcs.head_info["ver"]
+        print(f"nothing to commit, '{target_path.name}' matches HEAD (v{head_ver})")
+        sys.exit(1)
 
     callbacks = []
     if not args.no_sign:
