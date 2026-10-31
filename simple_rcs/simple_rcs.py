@@ -1224,11 +1224,20 @@ class SimpleRCS:
             # Should be string for RCS patch
             current_data = current_data.decode(self.encoding)
 
+        lines = current_data.splitlines(keepends=True)
+        self._apply_text_delta(lines, delta_text)
+        result = "".join(lines)
+        # Enforce EOL policy
+        if result and not result.endswith("\n"):
+            result += "\n"
+        return result
+
+    def _apply_text_delta(self, lines: list[str], delta_text: str | bytes) -> None:  # noqa: C901
+        """Applies an RCS-style reverse delta in place to `lines`, split with keepends=True."""
         # Ensure delta_text is str for RCS processing
         if isinstance(delta_text, bytes):
             delta_text = delta_text.decode(self.encoding)
 
-        lines = current_data.splitlines(keepends=True)
         commands = []
 
         script_lines = delta_text.splitlines()
@@ -1302,11 +1311,20 @@ class SimpleRCS:
                 # Delete `count` lines starting AT line `idx` (List index `idx-1`)
                 start_pos = idx - 1
                 del lines[start_pos : start_pos + cmd["count"]]
-        result = "".join(lines)
-        # Enforce EOL policy
-        if result and not result.endswith("\n"):
-            result += "\n"
-        return result
+
+    @staticmethod
+    def _lines_for_deltas(text: str | bytes) -> list[str] | None:
+        """`text` as a line list that deltas can be applied to in place, or None.
+
+        Only when every line ends in "\\n": joining and re-splitting such a list is
+        the identity, so applying deltas to it gives what _apply_reverse_delta gives
+        step by step. Bytes and other line breaks (a lone "\\r", "\\u2028", ...)
+        keep the step-by-step path.
+        """
+        if not isinstance(text, str):
+            return None
+        lines = text.splitlines(keepends=True)
+        return lines if all(line.endswith("\n") for line in lines) else None
 
     def _rewrite_head(self, payload: bytes) -> None:
         """Replace the tail of the stream, from the current HEAD's start, with payload.
@@ -1793,6 +1811,9 @@ class SimpleRCS:
 
         curr_content = self.head_info.get("text", default_content)  # Initialize curr_content safely
         curr_block = self.head_info
+        # Text deltas go into one line list for the whole walk: splitting and joining
+        # the full text for every delta dominated the cost of reaching old versions.
+        lines = self._lines_for_deltas(curr_content)
 
         # Iterate backwards, applying deltas
         while curr_block:
@@ -1806,13 +1827,19 @@ class SimpleRCS:
             if not prev_block.get("is_delta", True):  # Default to True (delta) if flag missing
                 # It's a snapshot! We can jump directly to this content.
                 curr_content = prev_block["text"]
+                lines = self._lines_for_deltas(curr_content)
             else:
                 # It's a delta. Apply it.
                 # prev_block contains the delta to transform curr_text to prev_text
                 # (Strictly speaking, V_prev contains delta to go from V_curr to V_prev)
                 delta = prev_block["text"]
                 try:
-                    curr_content = self._apply_reverse_delta(curr_content, delta)
+                    if lines is not None and codec.binary_tag(delta) is None:
+                        self._apply_text_delta(lines, delta)
+                    else:
+                        if lines is not None:
+                            curr_content, lines = "".join(lines), None
+                        curr_content = self._apply_reverse_delta(curr_content, delta)
                 except ValueError as e:
                     raise SimpleRCSCorruptionError(
                         f"Cannot reconstruct version '{prev_block.get('ver')}': "
@@ -1821,7 +1848,7 @@ class SimpleRCS:
 
             # Check if this is our target version
             if prev_block["ver"] == ver_num:
-                return curr_content
+                return "".join(lines) if lines is not None else curr_content
 
             curr_block = prev_block  # Move to the previous block
 
